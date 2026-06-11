@@ -43,12 +43,31 @@ class Diarizer:
         self.pipeline.to(torch.device(self.device))
         logger.info("Diarization pipeline ready.")
 
-    def diarize(self, audio_path: str | Path) -> list[DiarSegment]:
-        """Run speaker diarization and return sorted segments."""
+    def diarize(
+        self,
+        audio_path: str | Path,
+        num_speakers: int | None = None,
+        min_speakers: int | None = None,
+        max_speakers: int | None = None,
+    ) -> list[DiarSegment]:
+        """Run speaker diarization and return sorted segments.
+
+        Passing ``num_speakers`` (or a ``min``/``max`` range) when known
+        constrains pyannote's clustering and noticeably improves accuracy.
+        """
         audio_path = str(audio_path)
         logger.info("Diarizing %s …", audio_path)
 
-        result = self.pipeline(audio_path)
+        params: dict[str, int] = {}
+        if num_speakers is not None:
+            params["num_speakers"] = num_speakers
+        else:
+            if min_speakers is not None:
+                params["min_speakers"] = min_speakers
+            if max_speakers is not None:
+                params["max_speakers"] = max_speakers
+
+        result = self.pipeline(audio_path, **params)
         annotation = result.speaker_diarization
 
         speaker_map: dict[str, int] = {}
