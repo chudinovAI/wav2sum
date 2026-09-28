@@ -1,21 +1,15 @@
-from __future__ import annotations
-
 import logging
 
-import ollama
+from wav2sum.llm import LLM
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "gemma4:26b-a4b-it-q4_K_M"
+CHARS_PER_TOKEN = 3.5
+RESERVED_TOKENS = 4096
 
-# Above this many characters we summarize in a map-reduce fashion instead of
-# one shot, so multi-hour calls don't silently overflow the model context.
-MAX_SINGLE_PASS_CHARS = 24_000
-CHUNK_CHARS = 16_000
-
-SYSTEM_PROMPT = """\
+SUMMARY_PROMPT = """\
 Ты — ассистент для обработки протоколов рабочих совещаний.
-Тебе дан транскрипт аудиозаписи созвона с разметкой по спикерам.
+Тебе дан транскрипт созвона с разметкой по спикерам (или заметки по его частям).
 Составь по нему структурированное саммари на русском языке.
 
 Саммари должно содержать:
@@ -29,8 +23,7 @@ SYSTEM_PROMPT = """\
 Отвечай только на русском. Будь лаконичен и точен.\
 """
 
-# Used on each chunk of a long transcript before the final reduce step.
-MAP_PROMPT = """\
+CHUNK_PROMPT = """\
 Тебе дан фрагмент транскрипта рабочего созвона с разметкой по спикерам.
 Это только ЧАСТЬ встречи. Не пиши итоговое саммари.
 Выпиши из фрагмента, тезисно и на русском:
@@ -42,70 +35,25 @@ MAP_PROMPT = """\
 """
 
 
-class Summarizer:
-    """Meeting transcript summarization via a local Ollama model."""
+def summarize(transcript: str, llm: LLM) -> str:
+    max_chars = int((llm.num_ctx - RESERVED_TOKENS) * CHARS_PER_TOKEN)
+    if len(transcript) <= max_chars:
+        return llm.chat(SUMMARY_PROMPT, f"Транскрипт созвона:\n\n{transcript}")
 
-    def __init__(self, model: str = DEFAULT_MODEL):
-        self.model = model
-        logger.info("Summarizer model: %s", self.model)
-
-    def summarize(self, transcript: str) -> str:
-        """Summarize the transcript, map-reducing it if it is long."""
-        if len(transcript) <= MAX_SINGLE_PASS_CHARS:
-            logger.info("Single-pass summary (%d chars).", len(transcript))
-            return self._summarize_text(transcript)
-
-        chunks = _chunk_transcript(transcript, CHUNK_CHARS)
-        logger.info(
-            "Long transcript (%d chars) → map-reduce over %d chunks.",
-            len(transcript), len(chunks),
-        )
-
-        notes: list[str] = []
-        for i, chunk in enumerate(chunks, 1):
-            logger.info("Summarizing chunk %d/%d …", i, len(chunks))
-            notes.append(self._chat(MAP_PROMPT, chunk))
-
-        combined = "\n\n".join(
-            f"--- Заметки по части {i} ---\n{n}" for i, n in enumerate(notes, 1)
-        )
-        logger.info("Reducing %d chunk notes into final summary.", len(notes))
-        return self._summarize_text(combined)
-
-    # ── internals ────────────────────────────────────────────
-
-    def _summarize_text(self, text: str) -> str:
-        return self._chat(SYSTEM_PROMPT, f"Вот транскрипт созвона:\n\n{text}")
-
-    def _chat(self, system: str, user: str) -> str:
-        logger.info("Sending %d chars to Ollama (%s) …", len(user), self.model)
-        response = ollama.chat(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-        )
-        content: str = response["message"]["content"]
-        logger.info("Received %d chars.", len(content))
-        return content
+    chunks = chunk_transcript(transcript, max_chars * 2 // 3)
+    logger.info("Long transcript (%d chars): summarizing %d parts first.", len(transcript), len(chunks))
+    notes = [llm.chat(CHUNK_PROMPT, chunk) for chunk in chunks]
+    joined = "\n\n".join(f"--- Часть {i} ---\n{n}" for i, n in enumerate(notes, 1))
+    return llm.chat(SUMMARY_PROMPT, f"Заметки по частям созвона:\n\n{joined}")
 
 
-def _chunk_transcript(transcript: str, chunk_chars: int) -> list[str]:
-    """Pack whole utterances (split on blank lines) into bounded chunks."""
-    utterances = transcript.split("\n\n")
-    chunks: list[str] = []
-    current: list[str] = []
+def chunk_transcript(transcript: str, max_chars: int) -> list[str]:
+    chunks: list[list[str]] = [[]]
     size = 0
-
-    for utt in utterances:
-        # +2 accounts for the "\n\n" separator re-added on join.
-        if current and size + len(utt) + 2 > chunk_chars:
-            chunks.append("\n\n".join(current))
-            current, size = [], 0
-        current.append(utt)
-        size += len(utt) + 2
-
-    if current:
-        chunks.append("\n\n".join(current))
-    return chunks
+    for utterance in transcript.split("\n\n"):
+        if chunks[-1] and size + len(utterance) > max_chars:
+            chunks.append([])
+            size = 0
+        chunks[-1].append(utterance)
+        size += len(utterance) + 2
+    return ["\n\n".join(c) for c in chunks]

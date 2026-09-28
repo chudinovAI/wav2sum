@@ -1,49 +1,47 @@
 # wav2sum
 
-Audio → speaker-attributed transcript → meeting summary. Runs locally (MPS / CUDA / CPU).
+A local Krisp + Wispr Flow for macOS: call recording with a summary, and voice dictation into any app. Russian only.
 
-## Install
+![wav2sum tui](docs/tui.jpg)
+
+## Setup
 
 ```bash
-uv sync
 uv tool install -e .
-ollama pull gemma4:26b-a4b-it-q4_K_M
-export HF_TOKEN="hf_..."
+ollama pull gemma4:e4b-it-qat
+wav2sum app
 ```
 
-Default summary model: `gemma4:26b-a4b-it-q4_K_M` (override with `--model`).
+`wav2sum app` puts an icon in the menu bar and starts the background process. On first launch, allow Microphone,
+Accessibility, Input Monitoring, and System Audio Recording.
 
 ## Usage
 
-```bash
-wav2sum meeting.wav                                          # speakers default to 0=Я, 1=Илья
-wav2sum meeting.wav --speaker "0=Alex" --speaker "1=Maria"   # override speaker names
-wav2sum meeting.wav --model llama3.1:8b --no-timestamps -v
+- **Dictation.** Hold right ⌥, speak, release, and the text is typed into the active app. Double-tap for hands-free mode;
+  Esc cancels.
+- **Edit by voice.** Select some text, hold ⇧ + right ⌥, and say what to do ("make it shorter", "translate to English").
+- **Calls.** In the menu bar, choose "Записать созвон" (Record call), then "Остановить" (Stop). The transcript and
+  summary show up in `~/wav2sum/output/`.
+- **History and summaries.** Run `wav2sum tui`.
+- **An existing file.** Run `wav2sum meeting.mp3`.
 
-# Speaker count (default: 2). A range turns on auto-detection.
-wav2sum meeting.wav --num-speakers 4
-wav2sum meeting.wav --min-speakers 2 --max-speakers 5
+## Config
 
-# Reuse cached diarization/transcription off; recompute everything.
-wav2sum meeting.wav --no-cache
+`~/.config/wav2sum/config.toml`:
+
+```toml
+me = "Андрей"
+them = "Илья"
+model = "gemma4:e4b-it-qat"
+
+[dictation]
+model = "gemma4:e4b-it-qat"
+dictionary = ["Kubernetes", "GigaAM"]
+snippets = { "мой имейл" = "me@example.com" }
 ```
 
-Writes `transcript.txt`, `summary.md` and `meta.json` to `output/`.
-
-### Record a call (`wav2sum record`)
-
-Records your mic + the other side's system audio into one wav. Stop with Ctrl-C.
+## Development
 
 ```bash
-wav2sum record                       # → ./recordings/call-<timestamp>.wav
-wav2sum record --summarize           # record, then transcribe + summarize
-wav2sum record -o zoom.wav --summarize
+uv run pytest && uv run ruff check && uv run ruff format --check
 ```
-
-Device names are configurable via `--output-device` / `--input-device` / `--headphones`.
-
-One-time macOS setup (Audio MIDI Setup):
-
-- `brew install blackhole-2ch switchaudio-osx`
-- Multi-Output **"Call output"** = headphones + BlackHole 2ch (headphones as Master, Drift Correction on BlackHole). Select it as the speaker in your call app.
-- Aggregate **"Call recorder"** = built-in mic + BlackHole 2ch.

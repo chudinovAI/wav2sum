@@ -9,3 +9,4 @@ output/
 *.wav
 *.mp3
 *.ogg
+.ruff_cache/
