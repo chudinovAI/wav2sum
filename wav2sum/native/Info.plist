@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>ai.chudinov.wav2sum.capture</string>
+	<key>CFBundleName</key>
+	<string>wav2sum-capture</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>wav2sum records the other side of your calls.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>wav2sum records your side of calls and dictation.</string>
+</dict>
+</plist>

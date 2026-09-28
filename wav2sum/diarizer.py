@@ -1,90 +1,63 @@
-from __future__ import annotations
-
 import logging
 import os
+import threading
+import warnings
 from dataclasses import dataclass
-from pathlib import Path
 
+import numpy as np
 import torch
-from pyannote.audio import Pipeline as PyannotePipeline
+from huggingface_hub import get_token
 
-from wav2sum import detect_device
+from wav2sum.audio import SAMPLE_RATE
+
+with warnings.catch_warnings():
+    warnings.filterwarnings("ignore", message=r"(?s).*torchcodec.*")
+    from pyannote.audio import Pipeline
 
 logger = logging.getLogger(__name__)
 
-DIAR_MODEL = "pyannote/speaker-diarization-3.1"
+MODEL_ID = "pyannote/speaker-diarization-community-1"
 
 
 @dataclass
-class DiarSegment:
-    """A speaker turn: who spoke, when."""
+class Turn:
     speaker: int
     start: float
     end: float
 
 
 class Diarizer:
-    """Speaker diarization via pyannote.audio (MPS / CUDA / CPU)."""
-
-    def __init__(self, device: str | None = None):
-        self.device = detect_device(device)
-
-        token = os.environ.get("HF_TOKEN")
+    def __init__(self, device: str, lock: "threading.Lock | None" = None):
+        token = os.environ.get("HF_TOKEN") or get_token()
         if not token:
-            raise EnvironmentError(
-                "HF_TOKEN is required for pyannote models.  "
-                "Get yours at https://huggingface.co/settings/tokens"
+            raise OSError(
+                "A Hugging Face token is needed for pyannote (mono recordings and group calls): "
+                "set HF_TOKEN or run `hf auth login`."
             )
-
-        logger.info("Loading pyannote diarization on %s …", self.device)
-        self.pipeline = PyannotePipeline.from_pretrained(
-            DIAR_MODEL, token=token,
-        )
-        self.pipeline.to(torch.device(self.device))
-        logger.info("Diarization pipeline ready.")
+        self.lock = lock or threading.Lock()
+        logger.info("Loading pyannote on %s …", device)
+        self.pipeline = Pipeline.from_pretrained(MODEL_ID, token=token)
+        self.pipeline.to(torch.device(device))
 
     def diarize(
         self,
-        audio_path: str | Path,
+        audio: np.ndarray,
         num_speakers: int | None = None,
         min_speakers: int | None = None,
         max_speakers: int | None = None,
-    ) -> list[DiarSegment]:
-        """Run speaker diarization and return sorted segments.
-
-        Passing ``num_speakers`` (or a ``min``/``max`` range) when known
-        constrains pyannote's clustering and noticeably improves accuracy.
-        """
-        audio_path = str(audio_path)
-        logger.info("Diarizing %s …", audio_path)
-
-        params: dict[str, int] = {}
+    ) -> list[Turn]:
         if num_speakers is not None:
-            params["num_speakers"] = num_speakers
+            params = {"num_speakers": num_speakers}
         else:
-            if min_speakers is not None:
-                params["min_speakers"] = min_speakers
-            if max_speakers is not None:
-                params["max_speakers"] = max_speakers
+            params = {k: v for k, v in (("min_speakers", min_speakers), ("max_speakers", max_speakers)) if v}
 
-        result = self.pipeline(audio_path, **params)
-        annotation = result.speaker_diarization
+        waveform = torch.from_numpy(np.ascontiguousarray(audio)).unsqueeze(0)
+        with self.lock:
+            result = self.pipeline({"waveform": waveform, "sample_rate": SAMPLE_RATE}, **params)
 
-        speaker_map: dict[str, int] = {}
-        segments: list[DiarSegment] = []
-
-        for turn, _, speaker in annotation.itertracks(yield_label=True):
-            if speaker not in speaker_map:
-                speaker_map[speaker] = len(speaker_map)
-            segments.append(DiarSegment(
-                speaker=speaker_map[speaker],
-                start=turn.start,
-                end=turn.end,
-            ))
-
-        segments.sort(key=lambda s: s.start)
-        logger.info(
-            "Diarization done: %d segments, %d speakers.",
-            len(segments), len({s.speaker for s in segments}),
-        )
-        return segments
+        ids: dict[str, int] = {}
+        turns = [
+            Turn(ids.setdefault(label, len(ids)), segment.start, segment.end)
+            for segment, _, label in result.exclusive_speaker_diarization.itertracks(yield_label=True)
+        ]
+        return sorted(turns, key=lambda t: t.start)
