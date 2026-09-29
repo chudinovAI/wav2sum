@@ -31,6 +31,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
 
         daemon.onEvent = { [weak self] in self?.handle(event: $0) }
         daemon.onDisconnect = { [weak self] in self?.disconnected() }
+        dictation.corrections.onCorrection = { [weak self] original, edited in
+            self?.daemon.request("correction", ["original": original, "edited": edited])
+        }
         dictation.onBusyChange = { [weak self] busy in
             self?.dictating = busy
             self?.updateIcon()
@@ -82,8 +85,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             status["state"] = event["state"]
             dictation.isEnabled = isReady
         case "recording":
-            status["recording"] = (event["active"] as? Bool == true) ? ["path": event["path"] ?? ""] as JSON : nil
+            let active = event["active"] as? Bool == true
+            status["recording"] = active ? ["path": event["path"] ?? "", "auto": event["auto"] ?? NSNull()] as JSON : nil
             recordingSeconds = 0
+            if active, let app = event["auto"] as? String {
+                notify(title: "Recording \(appName(app)) call", body: "Stops by itself when the call ends.")
+            }
         case "level":
             recordingSeconds = event["seconds"] as? Double ?? recordingSeconds
         case "job":
@@ -91,7 +98,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             list.append(event)
             status["jobs"] = list
             if event["state"] as? String == "done" { notifyDone(job: event) }
-            if event["state"] as? String == "failed" { notify(title: "Не удалось обработать запись", body: event["error"] as? String ?? "") }
+            if event["state"] as? String == "failed" { notify(title: "Couldn't process the recording", body: event["error"] as? String ?? "") }
         default:
             break
         }
@@ -103,30 +110,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
 
         let header: String
         if !isConnected {
-            header = daemonWanted ? "wav2sum — запускаю…" : "wav2sum — выключен"
+            header = daemonWanted ? "wav2sum — starting…" : "wav2sum — off"
         } else if !isReady {
-            header = "wav2sum — загружаю модели…"
+            header = "wav2sum — loading models…"
         } else {
             let megabytes = (status["memory_mb"] as? Int ?? 0) + (status["llm_memory_mb"] as? Int ?? 0)
-            header = String(format: "wav2sum — готов · %.1f ГБ", Double(megabytes) / 1024)
+            header = String(format: "wav2sum — ready · %.1f GB", Double(megabytes) / 1024)
         }
         menu.addItem(disabled(header))
 
-        let toggle = item(daemonWanted ? "Выключить фоновый процесс" : "Включить фоновый процесс", #selector(toggleDaemon))
+        let toggle = item(daemonWanted ? "Turn Off Background Process" : "Turn On Background Process", #selector(toggleDaemon))
         menu.addItem(toggle)
         menu.addItem(.separator())
 
         if isRecording {
-            menu.addItem(item("■ Остановить запись  \(clock(recordingSeconds))", #selector(toggleRecording)))
+            let source = ((status["recording"] as? JSON)?["auto"] as? String).map { " (\(appName($0)))" } ?? ""
+            menu.addItem(item("■ Stop Recording\(source)  \(clock(recordingSeconds))", #selector(toggleRecording)))
         } else {
-            let record = item("● Записать созвон", #selector(toggleRecording))
+            let record = item("● Record Call", #selector(toggleRecording))
             record.isEnabled = isReady
             menu.addItem(record)
         }
 
         let key = dictation.hotkey.key.label
-        menu.addItem(disabled(isReady ? "Диктовка: держи \(key)  ·  двойное нажатие — без рук" : "Диктовка недоступна"))
-        if isReady { menu.addItem(disabled("Правка выделенного: ⇧ + \(key)")) }
+        menu.addItem(disabled(isReady ? "Dictation: hold \(key)  ·  double-tap for hands-free" : "Dictation unavailable"))
+        if isReady { menu.addItem(disabled("Edit selection: ⇧ + \(key)")) }
         for warning in permissionWarnings() {
             menu.addItem(warning)
         }
@@ -134,14 +142,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         let recent = jobs.suffix(5).reversed()
         if !recent.isEmpty {
             menu.addItem(.separator())
-            menu.addItem(disabled("Записи"))
+            menu.addItem(disabled("Recordings"))
             for job in recent {
                 let name = URL(fileURLWithPath: job["audio"] as? String ?? "").deletingPathExtension().lastPathComponent
                 let state = job["state"] as? String ?? ""
                 let suffix = switch state {
                 case "done": ""
-                case "failed": " — ошибка"
-                case "queued": " — в очереди"
+                case "failed": " — failed"
+                case "queued": " — queued"
                 default: " — \((job["stage"] as? String ?? "").lowercased())…"
                 }
                 let entry = item("\(name)\(suffix)", #selector(openJob(_:)))
@@ -152,14 +160,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         }
 
         menu.addItem(.separator())
-        menu.addItem(item("Открыть папку с результатами", #selector(openOutput)))
-        menu.addItem(item("Настройки (config.toml)", #selector(openConfig)))
-        menu.addItem(item("Логи", #selector(openLog)))
-        let login = item("Запускать при входе", #selector(toggleLoginItem))
+        menu.addItem(item("Open Output Folder", #selector(openOutput)))
+        menu.addItem(item("Settings (config.toml)", #selector(openConfig)))
+        menu.addItem(item("Logs", #selector(openLog)))
+        let login = item("Open at Login", #selector(toggleLoginItem))
         login.state = SMAppService.mainApp.status == .enabled ? .on : .off
         menu.addItem(login)
         menu.addItem(.separator())
-        menu.addItem(item("Выйти", #selector(quit)))
+        menu.addItem(item("Quit", #selector(quit)))
     }
 
     private func item(_ title: String, _ action: Selector) -> NSMenuItem {
@@ -200,7 +208,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
 
     @objc private func toggleRecording() {
         daemon.request(isRecording ? "record_stop" : "record_start") { [weak self] reply in
-            if let error = reply["error"] as? String { self?.notify(title: "Запись", body: error) }
+            if let error = reply["error"] as? String { self?.notify(title: "Recording", body: error) }
         }
     }
 
@@ -233,9 +241,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         var missing: [(String, String)] = []
         if !dictation.hotkey.isActive { missing.append(("Input Monitoring", "Privacy_ListenEvent")) }
         if !AXIsProcessTrusted() { missing.append(("Accessibility", "Privacy_Accessibility")) }
-        if AVCaptureDevice.authorizationStatus(for: .audio) != .authorized { missing.append(("Микрофон", "Privacy_Microphone")) }
+        if AVCaptureDevice.authorizationStatus(for: .audio) != .authorized { missing.append(("Microphone", "Privacy_Microphone")) }
         return missing.map { name, pane in
-            let entry = item("⚠︎ Нет доступа: \(name) — открыть настройки", #selector(openPrivacy(_:)))
+            let entry = item("⚠︎ No \(name) access — Open Settings", #selector(openPrivacy(_:)))
             entry.representedObject = pane
             return entry
         }
@@ -251,7 +259,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         do {
             if service.status == .enabled { try service.unregister() } else { try service.register() }
         } catch {
-            notify(title: "Автозапуск", body: error.localizedDescription)
+            notify(title: "Open at Login", body: error.localizedDescription)
         }
     }
 
@@ -262,7 +270,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
 
     private func notifyDone(job: JSON) {
         let name = URL(fileURLWithPath: job["audio"] as? String ?? "").deletingPathExtension().lastPathComponent
-        notify(title: "Саммари готово", body: name, userInfo: ["out_dir": job["out_dir"] as? String ?? ""])
+        notify(title: "Summary ready", body: name, userInfo: ["out_dir": job["out_dir"] as? String ?? ""])
     }
 
     private func notify(title: String, body: String, userInfo: [String: String] = [:]) {
@@ -287,6 +295,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
                                 withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
         completionHandler([.banner, .sound])
     }
+}
+
+private func appName(_ bundleID: String) -> String {
+    guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else { return bundleID }
+    return FileManager.default.displayName(atPath: url.path).replacingOccurrences(of: ".app", with: "")
 }
 
 private func clock(_ seconds: Double) -> String {

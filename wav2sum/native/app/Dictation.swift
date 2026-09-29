@@ -8,7 +8,7 @@ final class Hotkey {
 
         var keyCode: Int64 { switch self { case .rightOption: 61; case .rightCommand: 54; case .fn: 63 } }
         var flag: CGEventFlags { switch self { case .rightOption: .maskAlternate; case .rightCommand: .maskCommand; case .fn: .maskSecondaryFn } }
-        var label: String { switch self { case .rightOption: "правый ⌥"; case .rightCommand: "правый ⌘"; case .fn: "fn" } }
+        var label: String { switch self { case .rightOption: "right ⌥"; case .rightCommand: "right ⌘"; case .fn: "fn" } }
     }
 
     var key: Key = .rightOption
@@ -153,12 +153,12 @@ final class HUD {
     func show(_ state: State) {
         switch state {
         case .listening(let command):
-            label.stringValue = command ? "● Команда" : "● Слушаю"
+            label.stringValue = command ? "● Command" : "● Listening"
             label.textColor = .systemRed
             meter.isHidden = false
             meter.reset()
         case .thinking:
-            label.stringValue = "Печатаю…"
+            label.stringValue = "Typing…"
             label.textColor = .secondaryLabelColor
             meter.isHidden = true
         }
@@ -228,6 +228,20 @@ enum FocusedApp {
         }
     }
 
+    static var focusedElement: AXUIElement? {
+        let system = AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(system, 0.25)
+        guard let focused = attribute(system, kAXFocusedUIElementAttribute) else { return nil }
+        let element = focused as! AXUIElement
+        AXUIElementSetMessagingTimeout(element, 0.25)
+        return element
+    }
+
+    static func text(of element: AXUIElement) -> String? {
+        guard attribute(element, kAXSubroleAttribute) as? String != kAXSecureTextFieldSubrole as String else { return nil }
+        return attribute(element, kAXValueAttribute) as? String
+    }
+
     static func ensureAccessibility(prompt: Bool) -> Bool {
         AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: prompt] as CFDictionary)
     }
@@ -278,11 +292,71 @@ enum Clipboard {
     }
 }
 
+/// Follows a dictated text in its field for a minute and reports how the user edited it, so the daemon can learn words.
+final class CorrectionWatcher {
+    var onCorrection: ((_ original: String, _ edited: String) -> Void)?
+
+    private var element: AXUIElement?
+    private var original = ""
+    private var before = ""
+    private var after = ""
+    private var edited: String?
+    private var timer: Timer?
+    private var deadline = Date.distantPast
+
+    func track(_ text: String) {
+        finish()
+        guard let element = FocusedApp.focusedElement else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.begin(element, text) }
+    }
+
+    func finish() {
+        if timer != nil { read() }
+        timer?.invalidate()
+        timer = nil
+        if let edited, edited != original { onCorrection?(original, edited) }
+        element = nil
+        edited = nil
+    }
+
+    private func begin(_ element: AXUIElement, _ text: String) {
+        guard let value = FocusedApp.text(of: element), let range = value.range(of: text, options: .backwards) else { return }
+        self.element = element
+        original = text
+        before = String(value[..<range.lowerBound].suffix(40))
+        after = String(value[range.upperBound...].prefix(40))
+        deadline = Date().addingTimeInterval(60)
+        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            if Date() > self.deadline || !self.read() { self.finish() }
+        }
+    }
+
+    @discardableResult
+    private func read() -> Bool {
+        guard let element, let focused = FocusedApp.focusedElement, CFEqual(focused, element),
+              let value = FocusedApp.text(of: element),
+              let region = Self.region(in: value, between: before, and: after)
+        else { return false }
+        edited = region
+        return true
+    }
+
+    static func region(in value: String, between before: String, and after: String) -> String? {
+        guard let start = before.isEmpty ? value.startIndex : value.range(of: before)?.upperBound,
+              let end = after.isEmpty ? value.endIndex : value.range(of: after, range: start..<value.endIndex)?.lowerBound,
+              start < end
+        else { return nil }
+        return String(value[start..<end])
+    }
+}
+
 final class DictationController {
     var isEnabled = false
     var onBusyChange: ((Bool) -> Void)?
 
     let hotkey = Hotkey()
+    let corrections = CorrectionWatcher()
     private let mic = Microphone()
     private let hud = HUD()
     private let daemon: DaemonClient
@@ -341,6 +415,7 @@ final class DictationController {
     }
 
     private func begin(command: Bool, handsFree: Bool) {
+        corrections.finish()
         self.command = command
         context = ["app": FocusedApp.bundleID ?? "", "title": FocusedApp.windowTitle ?? "", "command": command]
         if command {
@@ -385,6 +460,7 @@ final class DictationController {
             if let text = reply["text"] as? String, !text.isEmpty {
                 Log.write("inserting \(text.count) chars, accessibility=\(AXIsProcessTrusted())")
                 Keyboard.insert(text)
+                if !self.command { self.corrections.track(text) }
             } else if let error = reply["error"] as? String {
                 Log.write("dictation failed: \(error)")
                 NSSound.beep()

@@ -318,6 +318,32 @@ if args.contains("--list-devices") {
     } catch { fail("\(error)") }
 }
 
+func appsUsingInput() -> [String] {
+    let system = AudioObjectID(kAudioObjectSystemObject)
+    guard let ids = try? readArray(system, kAudioHardwarePropertyProcessObjectList, of: AudioObjectID.self) else { return [] }
+    let apps = ids.compactMap { id -> String? in
+        guard (try? readValue(id, kAudioProcessPropertyIsRunningInput, initial: UInt32(0))) == 1,
+              let bundleID = readString(id, kAudioProcessPropertyBundleID), !bundleID.isEmpty
+        else { return nil }
+        return bundleID
+    }
+    return Set(apps).sorted()
+}
+
+if args.contains("--watch-inputs") {
+    var last: [String]?
+    let timer = DispatchSource.makeTimerSource(queue: .main)
+    timer.schedule(deadline: .now(), repeating: 1)
+    timer.setEventHandler {
+        if getppid() == 1 { exit(0) }
+        let apps = appsUsingInput()
+        if apps != last { emit(["event": "inputs", "apps": apps]) }
+        last = apps
+    }
+    timer.resume()
+    dispatchMain()
+}
+
 func option(_ name: String) -> String? {
     guard let i = args.firstIndex(of: name), i + 1 < args.count else { return nil }
     let value = args[i + 1]
@@ -330,7 +356,7 @@ reexecDisclaimed()
 let micQuery = option("--mic")
 let outRate = Double(option("--sample-rate") ?? "16000") ?? 16_000
 guard let outPath = args.first else {
-    FileHandle.standardError.write("usage: wav2sum-capture <out.wav> [--mic <name|uid>] [--sample-rate 16000] | --list-devices\n".data(using: .utf8)!)
+    FileHandle.standardError.write("usage: wav2sum-capture <out.wav> [--mic <name|uid>] [--sample-rate 16000] | --list-devices | --watch-inputs\n".data(using: .utf8)!)
     exit(2)
 }
 

@@ -26,7 +26,7 @@ class DaemonClient:
         try:
             reader, writer = await asyncio.open_unix_connection(str(SOCKET_PATH), limit=MAX_MESSAGE)
         except (FileNotFoundError, ConnectionRefusedError):
-            raise DaemonError("фоновый процесс не запущен (wav2sum serve или иконка в меню-баре)") from None
+            raise DaemonError("the background process is not running (wav2sum serve or the menu bar app)") from None
         return cls(reader, writer)
 
     async def request(self, cmd: str, **params) -> dict:
@@ -65,4 +65,4 @@ class DaemonClient:
         finally:
             self._events.put_nowait(None)
             for future in self._pending.values():
-                future.set_exception(DaemonError("соединение с фоновым процессом потеряно"))
+                future.set_exception(DaemonError("lost connection to the background process"))

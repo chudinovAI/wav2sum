@@ -41,7 +41,7 @@ final class DaemonClient {
 
     func request(_ cmd: String, _ params: JSON = [:], reply: ((JSON) -> Void)? = nil) {
         guard isConnected else {
-            reply?(["ok": false, "error": "фоновый процесс не запущен"])
+            reply?(["ok": false, "error": "the background process is not running"])
             return
         }
         let id = nextID
@@ -86,7 +86,7 @@ final class DaemonClient {
             self.isConnected = false
             let waiting = self.pending
             self.pending.removeAll()
-            waiting.values.forEach { $0(["ok": false, "error": "соединение потеряно"]) }
+            waiting.values.forEach { $0(["ok": false, "error": "connection lost"]) }
             self.onDisconnect?()
         }
     }

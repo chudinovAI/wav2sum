@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run ruff check
+      - run: uv run ruff format --check
+      - run: uv run pytest
+      - name: Typecheck Swift
+        run: |
+          swiftc -typecheck wav2sum/native/app/*.swift
+          swiftc -typecheck wav2sum/native/capture.swift
+          swiftc -typecheck wav2sum/native/app/Logo.swift wav2sum/native/icon/main.swift

@@ -26,6 +26,9 @@ class Transcriber:
         self.lock = lock or threading.Lock()
         logger.info("Loading GigaAM on %s …", device)
         self.model = AutoModel.from_pretrained(MODEL_ID, revision=REVISION, trust_remote_code=True).model
+        if device != "cpu":
+            # GigaAM already runs the encoder under fp16 autocast off the CPU; fp16 weights just save ~0.6 GB.
+            self.model.encoder.half()
         self.model.to(device).eval()
         self.cpu_head = copy.deepcopy(self.model.head).cpu().float()
 

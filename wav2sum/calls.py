@@ -96,7 +96,7 @@ def process(
     names = names or Names()
     timings = {}
 
-    on_stage("Распознаю речь")
+    on_stage("Transcribing")
     started = time.monotonic()
     params = {"version": CACHE_VERSION, "layout": layout, **asdict(speakers)}
     cache_file = out_root / ".cache" / file_hash(audio_path) / "utterances.json" if use_cache else None
@@ -108,7 +108,7 @@ def process(
 
     summary = ""
     if llm:
-        on_stage("Пишу саммари")
+        on_stage("Summarizing")
         started = time.monotonic()
         summary = summarize(format_transcript(conversation, timestamps=False), llm)
         timings["summarization"] = time.monotonic() - started
