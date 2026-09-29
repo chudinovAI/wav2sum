@@ -57,7 +57,7 @@ class CallRecorder:
         self._started.wait(timeout=15)
         if self._error or not self.started_at:
             self._proc.kill()
-            raise CaptureError(self._error or "wav2sum-capture не запустился")
+            raise CaptureError(self._error or "wav2sum-capture did not start")
 
     def wait(self) -> None:
         self._proc.wait()
@@ -71,7 +71,7 @@ class CallRecorder:
             self._proc.kill()
         self._reader.join(timeout=5)
         if self._error or self._proc.returncode != 0 or not self.path.exists():
-            raise CaptureError(self._error or f"wav2sum-capture завершился с кодом {self._proc.returncode}")
+            raise CaptureError(self._error or f"wav2sum-capture exited with code {self._proc.returncode}")
 
         sidecar = {
             "layout": "call",
@@ -119,10 +119,12 @@ class CallRecorder:
             return
         if self._peaks[1] <= SILENT_DB:
             logger.warning(
-                "Системный звук пустой за всю запись. Если собеседника было слышно — выдай доступ: System Settings → "
-                "Privacy & Security → Screen & System Audio Recording → System Audio Recording Only → wav2sum-capture."
+                "System audio was silent for the whole recording. If you could hear the other side, grant access: "
+                "System Settings → Privacy & Security → Screen & System Audio Recording → "
+                "System Audio Recording Only → wav2sum-capture."
             )
         if self._peaks[0] <= SILENT_DB:
             logger.warning(
-                "Микрофон пустой за всю запись. Проверь доступ: System Settings → Privacy & Security → Microphone."
+                "The microphone was silent for the whole recording. "
+                "Check access: System Settings → Privacy & Security → Microphone."
             )

@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 from wav2sum.capture import CallRecorder, CaptureError, Level, list_mics, new_recording_path
-from wav2sum.config import CONFIG_PATH, Config, load_config
+from wav2sum.config import CONFIG_PATH, STATE_DIR, Config, exclusive, load_config
 
 COMMANDS = ("transcribe", "record", "mics", "app", "tui", "serve", "status", "stop", "dictate")
 
@@ -36,93 +36,94 @@ def main() -> None:
 
         app = install_app()
         subprocess.run(["open", str(app)], check=True)
-        print(f"Запущено: {app} (иконка в меню-баре)")
+        print(f"Started: {app} (menu bar icon)")
     elif args.command == "tui":
         from wav2sum.tui import Wav2SumTUI
 
         Wav2SumTUI(cfg).run()
     elif args.command == "serve":
-        from wav2sum.daemon import serve
+        with exclusive(STATE_DIR / "daemon.lock", wait=False) as locked:
+            if not locked:
+                sys.exit("wav2sum daemon is already running")
+            from wav2sum.daemon import serve
 
-        serve(cfg, args.verbose)
+            serve(cfg, args.verbose)
     elif args.command in ("status", "stop"):
         _ask_daemon("status" if args.command == "status" else "shutdown")
     elif args.command == "dictate":
         _dictate(args, cfg)
     else:
         if not args.audio.exists():
-            sys.exit(f"Файл не найден: {args.audio}")
+            sys.exit(f"File not found: {args.audio}")
         _process(args.audio, args, cfg, layout=None if args.layout == "auto" else args.layout)
 
 
 def _parser(cfg: Config) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="wav2sum",
-        description="Локальные созвоны: запись → транскрипт → саммари.",
-        epilog=f"Настройки: {CONFIG_PATH}",
+        description="Local calls: recording → transcript → summary.",
+        epilog=f"Settings: {CONFIG_PATH}",
     )
     commands = parser.add_subparsers(dest="command")
 
-    transcribe = commands.add_parser("transcribe", help="транскрипт + саммари записи (можно без слова transcribe)")
-    transcribe.add_argument("audio", type=Path, help="аудиофайл (wav, mp3, m4a, …)")
+    transcribe = commands.add_parser("transcribe", help="transcript + summary of a recording (the default command)")
+    transcribe.add_argument("audio", type=Path, help="audio file (wav, mp3, m4a, …)")
     transcribe.add_argument(
         "--layout",
         choices=["auto", "call", "mono"],
         default="auto",
-        help="call — стерео из `wav2sum record` (L=я, R=собеседник); auto — по .json рядом",
+        help="call — stereo from `wav2sum record` (L=me, R=them); auto — from the .json next to it",
     )
     _add_processing_args(transcribe, cfg)
 
-    record = commands.add_parser("record", help="записать созвон: микрофон + системный звук (стоп — Ctrl-C)")
-    record.add_argument(
-        "-o", "--output", type=Path, help=f"путь для wav (default: {cfg.recordings_dir}/call-<время>.wav)"
-    )
-    record.add_argument("--mic", default=cfg.mic, help="имя или UID микрофона (список: wav2sum mics)")
-    record.add_argument("--summarize", action="store_true", help="после записи сразу транскрипт + саммари")
+    record = commands.add_parser("record", help="record a call: microphone + system audio (Ctrl-C to stop)")
+    record.add_argument("-o", "--output", type=Path, help=f"wav path (default: {cfg.recordings_dir}/call-<time>.wav)")
+    record.add_argument("--mic", default=cfg.mic, help="microphone name or UID (list: wav2sum mics)")
+    record.add_argument("--summarize", action="store_true", help="transcribe and summarize right after recording")
     _add_processing_args(record, cfg)
 
-    commands.add_parser("mics", help="список микрофонов")
+    commands.add_parser("mics", help="list microphones")
 
-    commands.add_parser("tui", help="терминальный интерфейс: созвоны, саммари, история диктовок")
-    commands.add_parser("app", help="собрать и запустить приложение в меню-баре (~/Applications/Wav2Sum.app)")
+    commands.add_parser("tui", help="terminal UI: calls, summaries, dictation history")
+    commands.add_parser("app", help="build and launch the menu bar app (~/Applications/Wav2Sum.app)")
     serve = commands.add_parser(
-        "serve", help="фоновый процесс: модели в памяти, диктовка, запись (обычно его запускает меню-бар)"
+        "serve", help="background process: models in memory, dictation, recording (usually started by the menu bar app)"
     )
     serve.add_argument("-v", "--verbose", action="store_true")
-    commands.add_parser("status", help="состояние фонового процесса")
-    commands.add_parser("stop", help="остановить фоновый процесс")
+    commands.add_parser("status", help="background process status")
+    commands.add_parser("stop", help="stop the background process")
 
-    dictate = commands.add_parser("dictate", help="прогнать аудиофайл через диктовку (для отладки)")
+    dictate = commands.add_parser("dictate", help="run an audio file through dictation (for debugging)")
     dictate.add_argument("audio", type=Path)
-    dictate.add_argument("--app", help="bundle id приложения, напр. ru.keepcoder.Telegram")
-    dictate.add_argument("--title", help="заголовок окна (для браузеров)")
+    dictate.add_argument("--app", help="app bundle id, e.g. ru.keepcoder.Telegram")
+    dictate.add_argument("--title", help="window title (for browsers)")
     dictate.add_argument(
-        "--command", dest="command_mode", action="store_true", help="голосовая команда над --selection"
+        "--command", dest="command_mode", action="store_true", help="voice command applied to --selection"
     )
-    dictate.add_argument("--selection", help="выделенный текст для --command")
+    dictate.add_argument("--selection", help="selected text for --command")
     return parser
 
 
 def _add_processing_args(parser: argparse.ArgumentParser, cfg: Config) -> None:
     parser.add_argument(
-        "--output-dir", type=Path, default=cfg.output_dir, help=f"куда писать (default: {cfg.output_dir})"
+        "--output-dir", type=Path, default=cfg.output_dir, help=f"where to write results (default: {cfg.output_dir})"
     )
-    parser.add_argument("--model", default=cfg.model, help=f"Ollama-модель для саммари (default: {cfg.model})")
-    parser.add_argument("--no-summary", action="store_true", help="только транскрипт")
-    parser.add_argument("--no-cache", action="store_true", help="не брать транскрипцию из кэша")
-    parser.add_argument("--device", help="cuda / mps / cpu (default: авто)")
-    parser.add_argument("--me", default=cfg.me, help=f"моё имя в созвоне (default: {cfg.me})")
-    parser.add_argument("--them", default=cfg.them, help=f"собеседник 1-на-1 (default: {cfg.them})")
+    parser.add_argument("--model", default=cfg.model, help=f"Ollama model for the summary (default: {cfg.model})")
+    parser.add_argument("--no-summary", action="store_true", help="transcript only")
+    parser.add_argument("--no-cache", action="store_true", help="ignore the cached transcription")
+    parser.add_argument("--device", help="cuda / mps / cpu (default: auto)")
+    parser.add_argument("--me", default=cfg.me, help=f"my name in the transcript (default: {cfg.me})")
+    parser.add_argument("--them", default=cfg.them, help=f"the other person in a 1-on-1 (default: {cfg.them})")
     parser.add_argument(
         "--speaker",
         action="append",
         default=[],
-        metavar="N=ИМЯ",
-        help='имя диаризованного спикера N (с нуля), напр. --speaker "0=Алексей"',
+        metavar="N=NAME",
+        help='name of diarized speaker N (zero-based), e.g. --speaker "0=Алексей"',
     )
-    parser.add_argument("--num-speakers", type=int, default=2, help="сколько всего людей, включая меня (default: 2)")
-    parser.add_argument("--min-speakers", type=int, help="минимум людей, если точно неизвестно")
-    parser.add_argument("--max-speakers", type=int, help="максимум людей, если точно неизвестно")
+    parser.add_argument("--num-speakers", type=int, default=2, help="total number of people, including me (default: 2)")
+    parser.add_argument("--min-speakers", type=int, help="minimum number of people, if unsure")
+    parser.add_argument("--max-speakers", type=int, help="maximum number of people, if unsure")
     parser.add_argument("-v", "--verbose", action="store_true")
 
 
@@ -134,13 +135,13 @@ def _record(args, cfg: Config) -> None:
             recorder.wait()
         wav = recorder.stop()
     except CaptureError as e:
-        sys.exit(f"\nОшибка записи: {e}")
+        sys.exit(f"\nRecording failed: {e}")
 
-    print(f"\nЗапись: {wav}")
+    print(f"\nRecording: {wav}")
     if args.summarize:
         _process(wav, args, cfg, layout="call")
     else:
-        print(f'Саммари: wav2sum "{wav}"')
+        print(f'Summary: wav2sum "{wav}"')
 
 
 def _process(audio: Path, args, cfg: Config, layout: str | None) -> None:
@@ -163,7 +164,7 @@ def _process(audio: Path, args, cfg: Config, layout: str | None) -> None:
     print(f"\n{result.transcript}")
     if result.summary:
         print(f"\n{'─' * 60}\n{result.summary}")
-    print(f"\n{'─' * 60}\nФайлы: {result.out_dir}")
+    print(f"\n{'─' * 60}\nFiles: {result.out_dir}")
 
 
 def _ask_daemon(cmd: str) -> None:
@@ -201,10 +202,13 @@ def _dictate(args, cfg: Config) -> None:
     except DaemonError:
         from dataclasses import asdict
 
+        from wav2sum.config import VOCABULARY_PATH
         from wav2sum.dictation import Dictator
         from wav2sum.models import Models
+        from wav2sum.vocabulary import Vocabulary
 
-        result = asdict(Dictator(Models(), cfg.dictation).dictate(audio, **context))
+        dictator = Dictator(Models(), cfg.dictation, vocabulary=Vocabulary(VOCABULARY_PATH))
+        result = asdict(dictator.dictate(audio, **context))
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
@@ -213,7 +217,7 @@ def _meter(level: Level) -> None:
         return
     m, s = divmod(int(level.seconds), 60)
     sys.stderr.write(
-        f"\r\033[31m●\033[0m {m:02d}:{s:02d}   я {_bar(level.mic_db)}   они {_bar(level.sys_db)}   Ctrl-C — стоп "
+        f"\r\033[31m●\033[0m {m:02d}:{s:02d}   me {_bar(level.mic_db)}   them {_bar(level.sys_db)}   Ctrl-C to stop "
     )
     sys.stderr.flush()
 

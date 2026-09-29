@@ -8,6 +8,7 @@ import numpy as np
 from wav2sum.config import DictationConfig
 from wav2sum.llm import LLM
 from wav2sum.models import Models
+from wav2sum.vocabulary import Vocabulary
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +96,7 @@ TITLE_STYLES = [
 ]
 
 MAX_GROWTH = 1.5
+MAX_PROMPT_FIXES = 40
 
 
 @dataclass
@@ -107,9 +109,10 @@ class Dictation:
 
 
 class Dictator:
-    def __init__(self, models: Models, cfg: DictationConfig, num_ctx: int = 4096):
+    def __init__(self, models: Models, cfg: DictationConfig, num_ctx: int = 4096, vocabulary: Vocabulary | None = None):
         self.models = models
         self.cfg = cfg
+        self.vocabulary = vocabulary or Vocabulary()
         self.llm = LLM(cfg.model, num_ctx=num_ctx, temperature=0.2, think=False, keep_alive=-1)
 
     def warm_up(self) -> None:
@@ -164,14 +167,17 @@ class Dictator:
                 text = marked
         if style == "chat":
             text = _drop_final_period(text)
-        return expand_snippets(text, snippets)
+        return expand_snippets(self.vocabulary.apply(text), snippets)
 
     def _prompt(self, base: str, style: str, markers: bool = False) -> str:
         parts = [base, STYLES.get(style, "")]
         if markers:
             parts.append("Метки вида ⟦1⟧ оставь на своих местах без изменений.")
-        if self.cfg.dictionary:
-            parts.append("Эти слова и имена пиши именно так: " + ", ".join(self.cfg.dictionary) + ".")
+        if words := list(dict.fromkeys([*self.cfg.dictionary, *self.vocabulary.words])):
+            parts.append("Эти слова и имена пиши именно так: " + ", ".join(words) + ".")
+        if fixes := list(self.vocabulary.pairs.items())[-MAX_PROMPT_FIXES:]:
+            pairs = ", ".join(f"«{heard}» → «{written}»" for heard, written in fixes)
+            parts.append(f"Распознавание речи путает эти слова, исправляй их и в других формах: {pairs}.")
         return "\n\n".join(p for p in parts if p)
 
 

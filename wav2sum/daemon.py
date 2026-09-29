@@ -7,6 +7,7 @@ import logging
 import logging.handlers
 import os
 import signal
+import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -15,14 +16,27 @@ import ollama
 
 from wav2sum import __version__
 from wav2sum.audio import pcm16_to_float
+from wav2sum.autorecord import CallDetector, watch_inputs
 from wav2sum.calls import Names, process
 from wav2sum.capture import CallRecorder, Level, new_recording_path
-from wav2sum.config import HISTORY_PATH, LOG_PATH, MAX_MESSAGE, SOCKET_PATH, STATE_DIR, Config, write_default_config
+from wav2sum.config import (
+    HISTORY_PATH,
+    LOG_PATH,
+    MAX_MESSAGE,
+    SOCKET_PATH,
+    STATE_DIR,
+    VOCABULARY_PATH,
+    Config,
+    write_default_config,
+)
 from wav2sum.dictation import Dictator
 from wav2sum.llm import LLM
 from wav2sum.models import Models
+from wav2sum.vocabulary import Vocabulary
 
 logger = logging.getLogger(__name__)
+
+AUTO_RECORD_TICK = 1.0
 
 
 @dataclass
@@ -40,9 +54,14 @@ class Daemon:
         self.cfg = cfg
         self.models = Models()
         shared = cfg.model == cfg.dictation.model
-        self.dictator = Dictator(self.models, cfg.dictation, num_ctx=cfg.num_ctx if shared else 4096)
+        self.dictator = Dictator(
+            self.models, cfg.dictation, num_ctx=cfg.num_ctx if shared else 4096, vocabulary=Vocabulary(VOCABULARY_PATH)
+        )
         self.summary_llm = LLM(cfg.model, num_ctx=cfg.num_ctx, keep_alive=-1 if shared else "1m")
         self.recorder: CallRecorder | None = None
+        self.auto_app: str | None = None
+        self.recording_lock = asyncio.Lock()
+        self.calls: CallDetector | None = None
         self.jobs: list[Job] = []
         self.job_ids = itertools.count(1)
         self.connections: set[asyncio.StreamWriter] = set()
@@ -55,7 +74,7 @@ class Daemon:
         self.queue: asyncio.Queue[Job] = asyncio.Queue()
 
         if await is_running():
-            raise SystemExit("wav2sum daemon уже запущен")
+            raise SystemExit("wav2sum daemon is already running")
         SOCKET_PATH.unlink(missing_ok=True)
         server = await asyncio.start_unix_server(self._serve, path=str(SOCKET_PATH), limit=MAX_MESSAGE)
         for sig in (signal.SIGINT, signal.SIGTERM):
@@ -63,6 +82,8 @@ class Daemon:
         logger.info("wav2sum %s daemon on %s (pid %d)", __version__, SOCKET_PATH, os.getpid())
 
         tasks = [asyncio.create_task(self._warm_up()), asyncio.create_task(self._work())]
+        if self.cfg.auto_record:
+            tasks.append(asyncio.create_task(self._watch_calls()))
         await self.stopping.wait()
 
         logger.info("Shutting down …")
@@ -104,9 +125,13 @@ class Daemon:
                 return self.status()
             case "dictate":
                 return await self._dictate(request)
+            case "correction":
+                return self._learn(request["original"], request["edited"])
             case "record_start":
                 return await self._record_start()
             case "record_stop":
+                if self.calls and self.calls.app:
+                    self.calls.dismiss()
                 return await self._record_stop()
             case "process":
                 return {"job": asdict(self._enqueue(Path(request["path"]).expanduser()))}
@@ -124,7 +149,9 @@ class Daemon:
             "memory_mb": _memory_mb(),
             "llm_memory_mb": _llm_memory_mb(),
             "hotkey": self.cfg.dictation.hotkey,
-            "recording": {"path": str(self.recorder.path), "seconds": self.recorder.seconds} if self.recorder else None,
+            "recording": {"path": str(self.recorder.path), "seconds": self.recorder.seconds, "auto": self.auto_app}
+            if self.recorder
+            else None,
             "jobs": [asdict(j) for j in self.jobs[-20:]],
         }
 
@@ -160,26 +187,68 @@ class Daemon:
         self._broadcast({"event": "dictation", **entry})
         return entry
 
-    async def _record_start(self) -> dict:
-        if self.recorder:
-            raise RuntimeError("запись уже идёт")
-        recorder = CallRecorder(new_recording_path(self.cfg.recordings_dir), self.cfg.mic, on_level=self._on_level)
-        await asyncio.to_thread(recorder.start)
-        self.recorder = recorder
-        self._broadcast({"event": "recording", "active": True, "path": str(recorder.path)})
+    def _learn(self, original: str, edited: str) -> dict:
+        if not self.cfg.dictation.learn:
+            return {"learned": []}
+        learned = self.dictator.vocabulary.learn(original, edited)
+        for heard, written in learned:
+            logger.info("Learned from an edit: %r → %r", heard, written)
+        if learned:
+            self._broadcast({"event": "learned", "pairs": learned})
+        return {"learned": learned}
+
+    async def _record_start(self, auto: str | None = None) -> dict:
+        async with self.recording_lock:
+            if self.recorder:
+                raise RuntimeError("already recording")
+            recorder = CallRecorder(new_recording_path(self.cfg.recordings_dir), self.cfg.mic, on_level=self._on_level)
+            await asyncio.to_thread(recorder.start)
+            self.recorder, self.auto_app = recorder, auto
+        logger.info("Recording %s%s", recorder.path, f" ({auto} call)" if auto else "")
+        self._broadcast({"event": "recording", "active": True, "path": str(recorder.path), "auto": auto})
         return {"path": str(recorder.path)}
 
     async def _record_stop(self) -> dict:
-        if not self.recorder:
-            raise RuntimeError("запись не идёт")
-        recorder, self.recorder = self.recorder, None
-        path = await asyncio.to_thread(recorder.stop)
+        async with self.recording_lock:
+            if not self.recorder:
+                raise RuntimeError("not recording")
+            recorder, self.recorder, self.auto_app = self.recorder, None, None
+            path = await asyncio.to_thread(recorder.stop)
         self._broadcast({"event": "recording", "active": False, "path": str(path)})
         return {"path": str(path), "job": asdict(self._enqueue(path))}
 
     def _on_level(self, level: Level) -> None:
         event = {"event": "level", "seconds": level.seconds, "mic_db": level.mic_db, "sys_db": level.sys_db}
         self.loop.call_soon_threadsafe(self._broadcast, event)
+
+    async def _watch_calls(self) -> None:
+        self.calls = CallDetector(self.cfg.call_apps)
+        deciding = asyncio.create_task(self._auto_record(self.calls))
+        try:
+            async for apps in watch_inputs():
+                before = self.calls.app
+                self.calls.observe(apps, time.monotonic())
+                if self.calls.app != before:
+                    logger.info("Call app on the microphone: %s", self.calls.app or "none")
+            logger.warning("Microphone watcher exited; automatic recording is off")
+        except Exception:
+            logger.exception("Microphone watcher failed; automatic recording is off")
+        finally:
+            deciding.cancel()
+
+    async def _auto_record(self, calls: CallDetector) -> None:
+        while True:
+            await asyncio.sleep(AUTO_RECORD_TICK)
+            kind = None if not self.recorder else "auto" if self.auto_app else "manual"
+            try:
+                match calls.decide(kind, time.monotonic()):
+                    case "start":
+                        await self._record_start(auto=calls.app)
+                    case "stop":
+                        await self._record_stop()
+            except Exception:
+                logger.exception("Automatic recording failed")
+                calls.dismiss()
 
     async def _warm_up(self) -> None:
         await asyncio.to_thread(self.dictator.warm_up)
@@ -249,6 +318,7 @@ def serve(cfg: Config, verbose: bool = False) -> None:
     file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
     logging.getLogger().addHandler(file_handler)
     logging.getLogger().setLevel(logging.DEBUG if verbose else logging.INFO)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     asyncio.run(Daemon(cfg).run())
 
 

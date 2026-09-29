@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from typing import ClassVar
 
+from rich.text import Text
 from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -88,17 +89,18 @@ class Wav2SumTUI(App):
     def compose(self) -> ComposeResult:
         with Vertical(id="left"):
             status = StatusPanel(id="status", classes="panel")
-            status.border_title = "[1] Статус"
+            status.border_title = "[1] Status"
             yield status
-            yield ListPanel("calls", "[2] Созвоны", "Запись", "Длит.", "Участники")
-            yield ListPanel("dictations", "[3] Диктовки", "Когда", "Текст")
-            yield ListPanel("jobs", "[4] Обработка", "Запись", "Состояние")
+            yield ListPanel("calls", "[2] Calls", "Recording", "Length", "Speakers")
+            yield ListPanel("dictations", "[3] Dictations", "When", "Text")
+            yield ListPanel("jobs", "[4] Processing", "Recording", "State")
         with VerticalScroll(id="detail", classes="panel"):
             yield Markdown(id="view")
+            yield Static(id="log", markup=False)
         yield Static(id="hints")
 
     def on_mount(self) -> None:
-        self.query_one("#detail").border_title = "[0] Подробности"
+        self.query_one("#detail").border_title = "[0] Details"
         self.load_calls()
         self.load_dictations()
         self.set_interval(0.5, self.refresh_status)
@@ -132,7 +134,7 @@ class Wav2SumTUI(App):
         table = self.query_one("#jobs", DataTable)
         table.clear()
         for job in reversed(self.status.get("jobs", [])):
-            state = {"queued": "в очереди", "done": "готово", "failed": "ошибка"}.get(job["state"], job["stage"] or "…")
+            state = {"queued": "queued", "done": "done", "failed": "failed"}.get(job["state"], job["stage"] or "…")
             table.add_row(Path(job["audio"]).stem.removeprefix("call-"), state, key=str(job["id"]))
 
     @on(DataTable.RowHighlighted)
@@ -143,21 +145,29 @@ class Wav2SumTUI(App):
     def show_row(self, table: DataTable, key: str) -> None:
         match table.id:
             case "calls":
-                self.show("Созвон", _call_markdown(Path(key)))
+                self.show("Call", _call_markdown(Path(key)))
             case "dictations":
-                self.show("Диктовка", _dictation_markdown(self.dictations[int(key)]))
+                self.show("Dictation", _dictation_markdown(self.dictations[int(key)]))
             case "jobs":
                 job = next((j for j in self.status.get("jobs", []) if str(j["id"]) == key), None)
                 if job:
-                    self.show("Обработка", _job_markdown(job))
+                    self.show("Processing", _job_markdown(job))
 
     def show_log(self) -> None:
-        lines = LOG_PATH.read_text(encoding="utf-8").splitlines()[-60:] if LOG_PATH.exists() else ["лога пока нет"]
-        self.show("Лог фонового процесса", "```\n" + "\n".join(lines) + "\n```")
+        lines = LOG_PATH.read_text(encoding="utf-8").splitlines()[-60:] if LOG_PATH.exists() else ["no log yet"]
+        self.show("Daemon log", Text("\n".join(lines), style="dim", overflow="fold"))
+        self.call_after_refresh(self.query_one("#detail").scroll_end, animate=False)
 
-    def show(self, title: str, markdown: str) -> None:
-        self.query_one("#detail").border_title = f"[0] {title}"
-        self.query_one("#view", Markdown).update(markdown)
+    def show(self, title: str, content: str | Text) -> None:
+        detail = self.query_one("#detail")
+        detail.border_title = f"[0] {title}"
+        view, log = self.query_one("#view", Markdown), self.query_one("#log", Static)
+        view.display, log.display = not isinstance(content, Text), isinstance(content, Text)
+        if isinstance(content, Text):
+            log.update(content)
+        else:
+            view.update(content)
+            detail.scroll_home(animate=False)
 
     @work(exclusive=True)
     async def follow_daemon(self) -> None:
@@ -184,51 +194,53 @@ class Wav2SumTUI(App):
                 self.status["recording"] = {**(self.status.get("recording") or {}), "seconds": event["seconds"]}
             case "recording":
                 self.status["recording"] = {"path": event["path"], "seconds": 0} if event["active"] else None
+                if event["active"] and event.get("auto"):
+                    self.notify(f"Recording {event['auto']} call; stops by itself when the call ends")
             case "job":
                 self.status["jobs"] = [j for j in self.status.get("jobs", []) if j["id"] != event["id"]] + [payload]
                 self.render_jobs()
                 if event["state"] == "done":
                     self.load_calls()
-                    self.notify(f"Саммари готово: {Path(event['out_dir']).name}")
+                    self.notify(f"Summary ready: {Path(event['out_dir']).name}")
                 elif event["state"] == "failed":
-                    self.notify(f"Ошибка обработки: {event['error']}", severity="error")
+                    self.notify(f"Processing failed: {event['error']}", severity="error")
             case "dictation":
                 self.dictations.insert(0, payload)
                 self.render_dictations()
 
     def refresh_status(self) -> None:
         if not self.client:
-            lines = ["[dim]○ фоновый процесс выключен[/]", "", "[b]d[/] — включить"]
+            lines = ["[dim]○ background process is off[/]", "", "[b]d[/] to start it"]
         elif self.status.get("state") != "ready":
-            lines = ["[yellow]◌ загружаю модели…[/]"]
+            lines = ["[yellow]◌ loading models…[/]"]
         else:
             memory = self.status.get("memory_mb", 0) + self.status.get("llm_memory_mb", 0)
             lines = [
-                "[green]● готов[/]",
-                f"память  {memory / 1024:.1f} ГБ  [dim](модели {self.status.get('memory_mb', 0)} МБ · "
-                f"LLM {self.status.get('llm_memory_mb', 0)} МБ)[/]",
-                f"диктовка  держи {_hotkey_label(self.status.get('hotkey', ''))}",
+                "[green]● ready[/]",
+                f"memory  {memory / 1024:.1f} GB  [dim](models {self.status.get('memory_mb', 0)} MB · "
+                f"LLM {self.status.get('llm_memory_mb', 0)} MB)[/]",
+                f"dictation  hold {_hotkey_label(self.status.get('hotkey', ''))}",
             ]
         if recording := self.status.get("recording"):
             mic, system = self.levels
-            lines.append(f"[red]● запись {_clock(recording.get('seconds', 0))}[/]  я {_bar(mic)}  они {_bar(system)}")
+            lines.append(f"[red]● rec {_clock(recording.get('seconds', 0))}[/]  me {_bar(mic)}  them {_bar(system)}")
         self.query_one("#status", Static).update("\n".join(lines))
 
-        record = "стоп записи" if self.status.get("recording") else "запись"
-        daemon = "выключить фон" if self.client else "включить фон"
+        record = "stop recording" if self.status.get("recording") else "record"
+        daemon = "stop daemon" if self.client else "start daemon"
         hints = [
             ("r", record),
             ("d", daemon),
-            ("o", "в Finder"),
-            ("1-4", "панели"),
-            ("j/k", "вверх/вниз"),
-            ("q", "выход"),
+            ("o", "show in Finder"),
+            ("1-4", "panels"),
+            ("j/k", "up/down"),
+            ("q", "quit"),
         ]
         self.query_one("#hints", Static).update("  ".join(f"[b $accent]{k}[/] {v}" for k, v in hints))
 
     async def action_record(self) -> None:
         if not self.client or self.status.get("state") != "ready":
-            self.notify("Фоновый процесс не готов", severity="warning")
+            self.notify("The background process is not ready", severity="warning")
             return
         try:
             await self.client.request("record_stop" if self.status.get("recording") else "record_start")
@@ -247,7 +259,7 @@ class Wav2SumTUI(App):
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            self.notify("Запускаю фоновый процесс…")
+            self.notify("Starting the background process…")
         else:
             await self.client.request("shutdown")
 
@@ -264,9 +276,9 @@ def _call_markdown(folder: Path) -> str:
     summary = folder / "summary.md"
     parts = [
         f"# {folder.name}",
-        summary.read_text(encoding="utf-8") if summary.exists() else "_Саммари нет_",
+        summary.read_text(encoding="utf-8") if summary.exists() else "_No summary_",
         "---",
-        "## Транскрипт",
+        "## Transcript",
     ]
     transcript = folder / "transcript.txt"
     if transcript.exists():
@@ -278,25 +290,25 @@ def _call_markdown(folder: Path) -> str:
 
 def _dictation_markdown(entry: dict) -> str:
     timings = entry.get("timings", {})
-    mode = "команда" if entry.get("command") else entry.get("style", "")
+    mode = "command" if entry.get("command") else entry.get("style", "")
     return (
         f"**{entry['time'][:19].replace('T', ' ')}** · `{entry.get('app') or '—'}` · {mode}\n\n"
-        f"{entry['text']}\n\n---\n\n**Распознано:** {entry['raw']}\n\n"
-        f"_{entry.get('seconds', 0)} с аудио · распознавание {timings.get('asr', 0)} с · LLM {timings.get('llm', 0)} с_"
+        f"{entry['text']}\n\n---\n\n**Recognized:** {entry['raw']}\n\n"
+        f"_{entry.get('seconds', 0)} s of audio · ASR {timings.get('asr', 0)} s · LLM {timings.get('llm', 0)} s_"
     )
 
 
 def _job_markdown(job: dict) -> str:
-    lines = [f"# {Path(job['audio']).name}", f"**Состояние:** {job['state']} {job['stage']}", f"`{job['audio']}`"]
+    lines = [f"# {Path(job['audio']).name}", f"**State:** {job['state']} {job['stage']}", f"`{job['audio']}`"]
     if job.get("out_dir"):
-        lines.append(f"**Результат:** `{job['out_dir']}`")
+        lines.append(f"**Output:** `{job['out_dir']}`")
     if job.get("error"):
-        lines.append(f"**Ошибка:** {job['error']}")
+        lines.append(f"**Error:** {job['error']}")
     return "\n\n".join(lines)
 
 
 def _hotkey_label(key: str) -> str:
-    return {"right_option": "правый ⌥", "right_command": "правый ⌘", "fn": "fn"}.get(key, key)
+    return {"right_option": "right ⌥", "right_command": "right ⌘", "fn": "fn"}.get(key, key)
 
 
 def _clock(seconds: float) -> str:

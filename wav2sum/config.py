@@ -1,7 +1,10 @@
+import contextlib
+import fcntl
 import json
 import logging
 import os
 import tomllib
+from collections.abc import Iterator
 from dataclasses import MISSING, dataclass, field, fields
 from pathlib import Path
 
@@ -12,6 +15,7 @@ STATE_DIR = Path.home() / "Library" / "Application Support" / "wav2sum"
 SOCKET_PATH = STATE_DIR / "daemon.sock"
 LOG_PATH = STATE_DIR / "daemon.log"
 HISTORY_PATH = STATE_DIR / "dictations.jsonl"
+VOCABULARY_PATH = STATE_DIR / "vocabulary.json"
 MAX_MESSAGE = 64 * 1024 * 1024
 
 
@@ -20,6 +24,7 @@ class DictationConfig:
     hotkey: str = "right_option"
     model: str = "gemma4:e4b-it-qat"
     cleanup: bool = True
+    learn: bool = True
     dictionary: list[str] = field(default_factory=list)
     snippets: dict[str, str] = field(default_factory=dict)
     apps: dict[str, str] = field(default_factory=dict)
@@ -34,11 +39,26 @@ class Config:
     mic: str | None = None
     recordings_dir: Path = Path("~/wav2sum/recordings")
     output_dir: Path = Path("~/wav2sum/output")
+    auto_record: bool = True
+    call_apps: list[str] = field(default_factory=lambda: ["us.zoom", "com.microsoft.teams2", "Cisco-Systems.Spark"])
     dictation: DictationConfig = field(default_factory=DictationConfig)
 
     def __post_init__(self):
         self.recordings_dir = Path(self.recordings_dir).expanduser()
         self.output_dir = Path(self.output_dir).expanduser()
+
+
+@contextlib.contextmanager
+def exclusive(path: Path, wait: bool = True) -> Iterator[bool]:
+    """Holds an flock on `path` across processes; yields False if `wait` is off and someone else holds it."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+        except BlockingIOError:
+            yield False
+            return
+        yield True
 
 
 def load_config(path: Path = CONFIG_PATH) -> Config:

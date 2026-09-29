@@ -1,6 +1,6 @@
 import tomllib
 
-from wav2sum.config import Config, load_config, write_default_config
+from wav2sum.config import Config, exclusive, load_config, write_default_config
 
 
 def test_default_config_round_trips(tmp_path):
@@ -16,3 +16,11 @@ def test_existing_settings_are_kept(tmp_path):
     path.write_text('me = "Андрей"\n')
     write_default_config(path)
     assert path.read_text() == 'me = "Андрей"\n'
+
+
+def test_exclusive_lock_admits_one_holder(tmp_path):
+    lock = tmp_path / "daemon.lock"
+    with exclusive(lock, wait=False) as first, exclusive(lock, wait=False) as second:
+        assert (first, second) == (True, False)
+    with exclusive(lock, wait=False) as again:
+        assert again
