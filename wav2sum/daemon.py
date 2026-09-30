@@ -20,7 +20,6 @@ from wav2sum.autorecord import CallDetector, watch_inputs
 from wav2sum.calls import Names, process
 from wav2sum.capture import CallRecorder, Level, new_recording_path
 from wav2sum.config import (
-    HISTORY_PATH,
     LOG_PATH,
     MAX_MESSAGE,
     SOCKET_PATH,
@@ -30,6 +29,7 @@ from wav2sum.config import (
     write_default_config,
 )
 from wav2sum.dictation import Dictator
+from wav2sum.history import append_dictation
 from wav2sum.llm import LLM
 from wav2sum.models import Models
 from wav2sum.vocabulary import Vocabulary
@@ -174,8 +174,7 @@ class Daemon:
             "timings": {k: round(v, 2) for k, v in result.timings.items()},
         }
         if result.raw:
-            with open(HISTORY_PATH, "a", encoding="utf-8") as f:
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            append_dictation(entry)
         logger.info(
             "Dictation [%s, %s] %.2fs asr + %.2fs llm: %r",
             request.get("app"),
