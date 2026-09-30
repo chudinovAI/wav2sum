@@ -11,10 +11,12 @@ from textual import on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
+from textual.screen import ModalScreen
 from textual.widgets import DataTable, Markdown, Static
 
 from wav2sum.client import DaemonClient, DaemonError
-from wav2sum.config import HISTORY_PATH, LOG_PATH, Config
+from wav2sum.config import LOG_PATH, Config
+from wav2sum.history import CAN_TRASH, delete_call, delete_dictation, load_dictations
 
 APP_DEFAULTS = "ai.chudinov.wav2sum"
 TRANSCRIPT_LINE = re.compile(r"^\[(\S+) – \S+\] ([^:]+): (.*)$")
@@ -39,6 +41,27 @@ class ListPanel(DataTable):
     def on_focus(self) -> None:
         if self.row_count:
             self.app.show_row(self, self.coordinate_to_cell_key(self.cursor_coordinate).row_key.value)
+
+
+class Confirm(ModalScreen[bool]):
+    CSS = """
+    Confirm { align: center middle; }
+    #dialog { width: 60; height: auto; padding: 1 2; border: round $error; background: $surface; }
+    """
+    BINDINGS: ClassVar = [
+        Binding("y", "answer(True)", show=False),
+        Binding("n,escape", "answer(False)", show=False),
+    ]
+
+    def __init__(self, question: str):
+        super().__init__()
+        self.question = question
+
+    def compose(self) -> ComposeResult:
+        yield Static(f"{self.question}\n\n[b $accent]y[/] delete   [b $accent]n[/] cancel", id="dialog")
+
+    def action_answer(self, yes: bool) -> None:
+        self.dismiss(yes)
 
 
 class Wav2SumTUI(App):
@@ -75,6 +98,7 @@ class Wav2SumTUI(App):
         Binding("r", "record", show=False),
         Binding("d", "daemon", show=False),
         Binding("o", "open", show=False),
+        Binding("x,delete", "delete", show=False),
         Binding("q", "quit", show=False),
     ]
 
@@ -119,9 +143,7 @@ class Wav2SumTUI(App):
             )
 
     def load_dictations(self) -> None:
-        if HISTORY_PATH.exists():
-            lines = HISTORY_PATH.read_text(encoding="utf-8").splitlines()[-500:]
-            self.dictations = [json.loads(line) for line in reversed(lines)]
+        self.dictations = load_dictations()
         self.render_dictations()
 
     def render_dictations(self) -> None:
@@ -232,6 +254,7 @@ class Wav2SumTUI(App):
             ("r", record),
             ("d", daemon),
             ("o", "show in Finder"),
+            ("x", "delete"),
             ("1-4", "panels"),
             ("j/k", "up/down"),
             ("q", "quit"),
@@ -265,6 +288,37 @@ class Wav2SumTUI(App):
 
     def action_focus(self, panel: str) -> None:
         self.query_one(f"#{panel}").focus()
+
+    def action_delete(self) -> None:
+        table = self.focused
+        if not isinstance(table, ListPanel) or table.id not in ("calls", "dictations") or not table.row_count:
+            return
+        key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
+        where = "to the Trash" if CAN_TRASH else "permanently"
+        if table.id == "calls":
+            question = f"Move call [b]{Path(key).name}[/] {where}? Its recording goes too if wav2sum made it."
+        else:
+            question = f"Delete this dictation from history?\n\n[dim]{self.dictations[int(key)]['text'][:200]}[/]"
+        self.push_screen(Confirm(question), lambda yes: self.delete_row(table, key) if yes else None)
+
+    def delete_row(self, table: DataTable, key: str) -> None:
+        row = table.cursor_row
+        try:
+            if table.id == "calls":
+                delete_call(Path(key), self.cfg.recordings_dir)
+                self.load_calls()
+            else:
+                delete_dictation(self.dictations[int(key)])
+                del self.dictations[int(key)]
+                self.render_dictations()
+        except Exception as e:
+            self.notify(f"Couldn't delete: {e}", severity="error")
+            return
+        if table.row_count:
+            table.move_cursor(row=min(row, table.row_count - 1))
+            self.show_row(table, table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value)
+        else:
+            self.show("Details", "")
 
     def action_open(self) -> None:
         table = self.query_one("#calls", DataTable)

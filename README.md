@@ -25,7 +25,7 @@ Accessibility, Input Monitoring, and System Audio Recording.
   show up in `~/wav2sum/output/`.
 - **Learning from edits.** If you fix a term or a name right after dictating ("гитхаб" → "GitHub"), wav2sum remembers
   it and writes it that way next time. Learned words live in `~/Library/Application Support/wav2sum/vocabulary.json`.
-- **History and summaries.** Run `wav2sum tui`.
+- **History and summaries.** Run `wav2sum tui`. Press `x` on a call or a dictation to delete it; calls go to the Trash.
 - **An existing file.** Run `wav2sum meeting.mp3`.
 
 ## Config
