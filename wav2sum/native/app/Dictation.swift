@@ -119,11 +119,13 @@ final class Microphone {
 }
 
 final class HUD {
-    enum State { case listening(command: Bool), thinking }
+    enum State { case listening(command: Bool), thinking, success }
 
     private let panel: NSPanel
     private let label = NSTextField(labelWithString: "")
     private let meter = LevelView()
+    private let check = CheckmarkView()
+    private var generation = 0
 
     init() {
         panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 190, height: 40),
@@ -146,11 +148,16 @@ final class HUD {
         label.textColor = .labelColor
         label.frame = NSRect(x: 16, y: 11, width: 100, height: 18)
         meter.frame = NSRect(x: 120, y: 10, width: 54, height: 20)
+        check.frame = NSRect(x: 150, y: 10, width: 20, height: 20)
         background.addSubview(label)
         background.addSubview(meter)
+        background.addSubview(check)
     }
 
     func show(_ state: State) {
+        generation += 1
+        panel.alphaValue = 1
+        check.isHidden = true
         switch state {
         case .listening(let command):
             label.stringValue = command ? "● Command" : "● Listening"
@@ -161,6 +168,13 @@ final class HUD {
             label.stringValue = "Typing…"
             label.textColor = .secondaryLabelColor
             meter.isHidden = true
+        case .success:
+            label.stringValue = "Success"
+            label.textColor = .systemGreen
+            meter.isHidden = true
+            check.isHidden = false
+            check.animate()
+            fadeOut(after: 1.0)
         }
         if let screen = NSScreen.main {
             let frame = screen.visibleFrame
@@ -171,7 +185,78 @@ final class HUD {
 
     func level(_ rms: Float) { meter.push(rms) }
 
-    func hide() { panel.orderOut(nil) }
+    func hide() {
+        generation += 1
+        panel.orderOut(nil)
+    }
+
+    /// A newer show() or hide() bumps the generation and cancels a pending fade.
+    private func fadeOut(after delay: TimeInterval) {
+        let current = generation
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self, self.generation == current else { return }
+            NSAnimationContext.runAnimationGroup({ context in
+                context.duration = 0.3
+                self.panel.animator().alphaValue = 0
+            }, completionHandler: { [weak self] in
+                guard let self, self.generation == current else { return }
+                self.panel.orderOut(nil)
+                self.panel.alphaValue = 1
+            })
+        }
+    }
+}
+
+/// A green circle with a checkmark that draws itself in.
+final class CheckmarkView: NSView {
+    private let circle = CAShapeLayer()
+    private let tick = CAShapeLayer()
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        wantsLayer = true
+        circle.fillColor = NSColor.systemGreen.cgColor
+        tick.fillColor = nil
+        tick.strokeColor = NSColor.white.cgColor
+        tick.lineWidth = 2
+        tick.lineCap = .round
+        tick.lineJoin = .round
+        layer?.addSublayer(circle)
+        layer?.addSublayer(tick)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func layout() {
+        super.layout()
+        let b = bounds
+        circle.frame = b
+        circle.path = CGPath(ellipseIn: b, transform: nil)
+        let path = CGMutablePath()
+        path.move(to: CGPoint(x: b.width * 0.28, y: b.height * 0.52))
+        path.addLine(to: CGPoint(x: b.width * 0.44, y: b.height * 0.36))
+        path.addLine(to: CGPoint(x: b.width * 0.72, y: b.height * 0.66))
+        tick.frame = b
+        tick.path = path
+    }
+
+    func animate() {
+        layoutSubtreeIfNeeded()
+        let pop = CAKeyframeAnimation(keyPath: "transform.scale")
+        pop.values = [0.3, 1.15, 1.0]
+        pop.keyTimes = [0, 0.6, 1]
+        pop.duration = 0.3
+        circle.add(pop, forKey: "pop")
+
+        let draw = CABasicAnimation(keyPath: "strokeEnd")
+        draw.fromValue = 0
+        draw.toValue = 1
+        draw.beginTime = CACurrentMediaTime() + 0.15
+        draw.duration = 0.25
+        draw.fillMode = .backwards
+        draw.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        tick.add(draw, forKey: "draw")
+    }
 }
 
 final class LevelView: NSView {
@@ -262,20 +347,14 @@ enum Keyboard {
         }
     }
 
-    static func insert(_ text: String) {
-        let pasteboard = NSPasteboard.general
-        let saved = Clipboard.save()
-        pasteboard.clearContents()
-        pasteboard.setString(text, forType: .string)
-        let ours = pasteboard.changeCount
-        press(9, flags: .maskCommand)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            if pasteboard.changeCount == ours { Clipboard.restore(saved) }
-        }
-    }
 }
 
 enum Clipboard {
+    static func copy(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+
     static func save() -> [NSPasteboardItem] {
         (NSPasteboard.general.pasteboardItems ?? []).map { item in
             let copy = NSPasteboardItem()
@@ -292,7 +371,8 @@ enum Clipboard {
     }
 }
 
-/// Follows a dictated text in its field for a minute and reports how the user edited it, so the daemon can learn words.
+/// Waits for a dictated text to be pasted somewhere, follows it in that field for a minute and reports how the user
+/// edited it, so the daemon can learn words.
 final class CorrectionWatcher {
     var onCorrection: ((_ original: String, _ edited: String) -> Void)?
 
@@ -302,15 +382,25 @@ final class CorrectionWatcher {
     private var after = ""
     private var edited: String?
     private var timer: Timer?
+    private var waiting: Timer?
     private var deadline = Date.distantPast
 
     func track(_ text: String) {
         finish()
-        guard let element = FocusedApp.focusedElement else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in self?.begin(element, text) }
+        let deadline = Date().addingTimeInterval(30)
+        waiting = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] timer in
+            guard let self else { return timer.invalidate() }
+            if Date() > deadline { return self.finish() }
+            guard let element = FocusedApp.focusedElement, FocusedApp.text(of: element)?.contains(text) == true else { return }
+            self.waiting?.invalidate()
+            self.waiting = nil
+            self.begin(element, text)
+        }
     }
 
     func finish() {
+        waiting?.invalidate()
+        waiting = nil
         if timer != nil { read() }
         timer?.invalidate()
         timer = nil
@@ -455,15 +545,18 @@ final class DictationController {
         daemon.request("dictate", request) { [weak self] reply in
             guard let self else { return }
             self.phase = .idle
-            self.hud.hide()
             self.onBusyChange?(false)
             if let text = reply["text"] as? String, !text.isEmpty {
-                Log.write("inserting \(text.count) chars, accessibility=\(AXIsProcessTrusted())")
-                Keyboard.insert(text)
+                Log.write("copying \(text.count) chars to the clipboard")
+                Clipboard.copy(text)
+                self.hud.show(.success)
                 if !self.command { self.corrections.track(text) }
-            } else if let error = reply["error"] as? String {
-                Log.write("dictation failed: \(error)")
-                NSSound.beep()
+            } else {
+                self.hud.hide()
+                if let error = reply["error"] as? String {
+                    Log.write("dictation failed: \(error)")
+                    NSSound.beep()
+                }
             }
         }
     }
