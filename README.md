@@ -17,13 +17,14 @@ Accessibility, Input Monitoring, and System Audio Recording.
 
 ## Usage
 
-- **Dictation.** Hold right ⌥, speak, release, and the text is typed into the active app. Double-tap for hands-free mode;
-  Esc cancels.
-- **Edit by voice.** Select some text, hold ⇧ + right ⌥, and say what to do ("make it shorter", "translate to English").
+- **Dictation.** Hold right ⌥, speak, release, and the text is copied to the clipboard; paste it with ⌘V. Double-tap for
+  hands-free mode; Esc cancels.
+- **Edit by voice.** Select some text, hold ⇧ + right ⌥, and say what to do ("make it shorter", "translate to English");
+  the result is copied to the clipboard.
 - **Calls.** Recording starts by itself when Zoom, Teams, or Webex takes the microphone and stops once the call ends.
   To record anything else, choose "Record Call" in the menu bar, then "Stop Recording". The transcript and summary
   show up in `~/wav2sum/output/`.
-- **Learning from edits.** If you fix a term or a name right after dictating ("гитхаб" → "GitHub"), wav2sum remembers
+- **Learning from edits.** If you fix a term or a name right after pasting a dictation ("гитхаб" → "GitHub"), wav2sum remembers
   it and writes it that way next time. Learned words live in `~/Library/Application Support/wav2sum/vocabulary.json`.
 - **History and summaries.** Run `wav2sum tui`. Press `x` on a call or a dictation to delete it; calls go to the Trash.
 - **An existing file.** Run `wav2sum meeting.mp3`.
