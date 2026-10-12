@@ -9,6 +9,7 @@ A local Krisp + Wispr Flow for macOS: call recording with a summary, and voice d
 ```bash
 uv tool install -e .
 ollama pull gemma4:e4b-it-qat
+ollama pull gemma4:12b-it-qat
 wav2sum app
 ```
 
@@ -36,7 +37,7 @@ Accessibility, Input Monitoring, and System Audio Recording.
 ```toml
 me = "Андрей"
 them = "Илья"
-model = "gemma4:e4b-it-qat"
+model = "gemma4:12b-it-qat"  # summaries
 auto_record = true
 call_apps = ["us.zoom", "com.microsoft.teams2", "Cisco-Systems.Spark"]  # bundle id prefixes
 
