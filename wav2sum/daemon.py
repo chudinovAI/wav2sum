@@ -57,7 +57,7 @@ class Daemon:
         self.dictator = Dictator(
             self.models, cfg.dictation, num_ctx=cfg.num_ctx if shared else 4096, vocabulary=Vocabulary(VOCABULARY_PATH)
         )
-        self.summary_llm = LLM(cfg.model, num_ctx=cfg.num_ctx, keep_alive=-1 if shared else "1m")
+        self.summary_llm = LLM(cfg.model, num_ctx=cfg.num_ctx, think=True, keep_alive=-1 if shared else "1m")
         self.recorder: CallRecorder | None = None
         self.auto_app: str | None = None
         self.recording_lock = asyncio.Lock()
@@ -277,6 +277,8 @@ class Daemon:
                     self.cfg.output_dir,
                     llm=self.summary_llm,
                     names=Names(self.cfg.me, self.cfg.them),
+                    vocabulary=Vocabulary(VOCABULARY_PATH),
+                    dictionary=self.cfg.dictation.dictionary,
                     on_stage=lambda stage, job=job: self.loop.call_soon_threadsafe(self._update, job, "running", stage),
                 )
                 self._update(job, state="done", stage="", out_dir=str(result.out_dir))

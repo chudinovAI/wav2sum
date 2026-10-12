@@ -34,7 +34,7 @@ class DictationConfig:
 class Config:
     me: str = "Я"
     them: str = "Собеседник"
-    model: str = "gemma4:e4b-it-qat"
+    model: str = "gemma4:12b-it-qat"
     num_ctx: int = 16384
     mic: str | None = None
     recordings_dir: Path = Path("~/wav2sum/recordings")

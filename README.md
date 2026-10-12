@@ -35,7 +35,7 @@ Accessibility, Input Monitoring, and System Audio Recording.
 ```toml
 me = "Андрей"
 them = "Илья"
-model = "gemma4:e4b-it-qat"
+model = "gemma4:12b-it-qat"  # summaries
 auto_record = true
 call_apps = ["us.zoom", "com.microsoft.teams2", "Cisco-Systems.Spark"]  # bundle id prefixes
 

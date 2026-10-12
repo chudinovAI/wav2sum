@@ -146,18 +146,22 @@ def _record(args, cfg: Config) -> None:
 
 def _process(audio: Path, args, cfg: Config, layout: str | None) -> None:
     from wav2sum.calls import Names, Speakers, process
+    from wav2sum.config import VOCABULARY_PATH
     from wav2sum.llm import LLM
     from wav2sum.models import Models
+    from wav2sum.vocabulary import Vocabulary
 
     ranged = args.min_speakers is not None or args.max_speakers is not None
     result = process(
         audio,
         Models(args.device),
         args.output_dir,
-        llm=None if args.no_summary else LLM(args.model, num_ctx=cfg.num_ctx),
+        llm=None if args.no_summary else LLM(args.model, num_ctx=cfg.num_ctx, think=True),
         layout=layout,
         speakers=Speakers(None if ranged else args.num_speakers, args.min_speakers, args.max_speakers),
         names=Names(args.me, args.them, {int(n): name for n, name in (s.split("=", 1) for s in args.speaker)}),
+        vocabulary=Vocabulary(VOCABULARY_PATH),
+        dictionary=cfg.dictation.dictionary,
         use_cache=not args.no_cache,
         on_stage=lambda stage: logging.info("%s …", stage),
     )

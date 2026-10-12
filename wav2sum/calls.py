@@ -1,7 +1,7 @@
 import json
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -13,6 +13,7 @@ from wav2sum.echo import suppress_echo
 from wav2sum.llm import LLM
 from wav2sum.models import Models
 from wav2sum.summarizer import summarize
+from wav2sum.vocabulary import Vocabulary
 
 logger = logging.getLogger(__name__)
 
@@ -88,12 +89,15 @@ def process(
     layout: str | None = None,
     speakers: Speakers | None = None,
     names: Names | None = None,
+    vocabulary: Vocabulary | None = None,
+    dictionary: Sequence[str] = (),
     use_cache: bool = True,
     on_stage: Callable[[str], None] = lambda stage: None,
 ) -> Result:
     layout = layout or detect_layout(audio_path)
     speakers = speakers or Speakers()
     names = names or Names()
+    vocabulary = vocabulary or Vocabulary()
     timings = {}
 
     on_stage("Transcribing")
@@ -104,13 +108,16 @@ def process(
     utterances = _cached(cache_file, params, lambda: transcribe(audio, layout, speakers, models))
     timings["transcription"] = time.monotonic() - started
 
-    conversation = build_conversation([Utterance(u.start, u.end, u.text, names(u.speaker)) for u in utterances])
+    conversation = build_conversation(
+        [Utterance(u.start, u.end, vocabulary.apply(u.text), names(u.speaker)) for u in utterances]
+    )
 
     summary = ""
     if llm:
         on_stage("Summarizing")
         started = time.monotonic()
-        summary = summarize(format_transcript(conversation, timestamps=False), llm)
+        terms = list(dict.fromkeys([*dictionary, *vocabulary.words]))
+        summary = summarize(format_transcript(conversation, timestamps=False), llm, terms)
         timings["summarization"] = time.monotonic() - started
 
     result = Result(out_root / audio_path.stem, layout, len(audio) / SAMPLE_RATE, conversation, summary, timings)
