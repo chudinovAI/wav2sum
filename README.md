@@ -9,6 +9,7 @@ A local Krisp + Wispr Flow for macOS: call recording with a summary, and voice d
 ```bash
 uv tool install -e .
 ollama pull gemma4:e4b-it-qat
+ollama pull gemma4:12b-it-qat
 wav2sum app
 ```
 
