@@ -29,6 +29,12 @@ def test_ignores_ordinary_words_and_grammar():
     assert corrections("Завтра созвонимся", "Послезавтра созвонимся") == []
 
 
+def test_ignores_english_grammar_but_learns_english_terms():
+    assert corrections("I think there going home", "I think they're going home") == []
+    assert corrections("Send it to their team", "Send it to there team") == []
+    assert corrections("Parse the jason file", "Parse the JSON file") == [("jason", "JSON")]
+
+
 def test_learns_names_and_case_fixes():
     assert corrections("Передай милене, что всё готово", "Передай Милене, что всё готово") == [("милене", "Милене")]
     assert corrections("Залей на гитхаб", "Залей на GitHub") == [("гитхаб", "GitHub")]

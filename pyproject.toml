@@ -17,6 +17,8 @@ dependencies = [
     "numpy>=2.2.6",
     "scipy>=1.15.3",
     "textual>=3",
+    "speechbrain>=1.0",
+    "parakeet-mlx>=0.5",
 ]
 
 [project.scripts]

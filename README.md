@@ -1,6 +1,6 @@
 # wav2sum
 
-A local Krisp + Wispr Flow for macOS: call recording with a summary, and voice dictation into any app. Russian only.
+A local Krisp + Wispr Flow for macOS: call recording with a summary, and voice dictation into any app. Russian and English.
 
 ![wav2sum tui](docs/tui.jpg)
 
@@ -26,6 +26,9 @@ Accessibility, Input Monitoring, and System Audio Recording.
   show up in `~/wav2sum/output/`.
 - **Learning from edits.** If you fix a term or a name right after dictating ("гитхаб" → "GitHub"), wav2sum remembers
   it and writes it that way next time. Learned words live in `~/Library/Application Support/wav2sum/vocabulary.json`.
+- **Language.** Each call and each dictation is checked for Russian or English. Russian goes to GigaAM, English to
+  Parakeet, and the summary and the cleanup are written in the same language. Set `language = "ru"` or `"en"` to
+  skip the check.
 - **History and summaries.** Run `wav2sum tui`. Press `x` on a call or a dictation to delete it; calls go to the Trash.
 - **An existing file.** Run `wav2sum meeting.mp3`.
 
@@ -36,6 +39,7 @@ Accessibility, Input Monitoring, and System Audio Recording.
 ```toml
 me = "Андрей"
 them = "Илья"
+language = "auto"  # or "ru" / "en"
 model = "gemma4:12b-it-qat"  # summaries
 auto_record = true
 call_apps = ["us.zoom", "com.microsoft.teams2", "Cisco-Systems.Spark"]  # bundle id prefixes

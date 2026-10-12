@@ -112,6 +112,12 @@ def _add_processing_args(parser: argparse.ArgumentParser, cfg: Config) -> None:
     parser.add_argument("--no-summary", action="store_true", help="transcript only")
     parser.add_argument("--no-cache", action="store_true", help="ignore the cached transcription")
     parser.add_argument("--device", help="cuda / mps / cpu (default: auto)")
+    parser.add_argument(
+        "--language",
+        choices=["auto", "ru", "en"],
+        default=cfg.language,
+        help=f"speech language (default: {cfg.language})",
+    )
     parser.add_argument("--me", default=cfg.me, help=f"my name in the transcript (default: {cfg.me})")
     parser.add_argument("--them", default=cfg.them, help=f"the other person in a 1-on-1 (default: {cfg.them})")
     parser.add_argument(
@@ -160,6 +166,7 @@ def _process(audio: Path, args, cfg: Config, layout: str | None) -> None:
         layout=layout,
         speakers=Speakers(None if ranged else args.num_speakers, args.min_speakers, args.max_speakers),
         names=Names(args.me, args.them, {int(n): name for n, name in (s.split("=", 1) for s in args.speaker)}),
+        language=args.language,
         vocabulary=Vocabulary(VOCABULARY_PATH),
         dictionary=cfg.dictation.dictionary,
         use_cache=not args.no_cache,
@@ -211,7 +218,7 @@ def _dictate(args, cfg: Config) -> None:
         from wav2sum.models import Models
         from wav2sum.vocabulary import Vocabulary
 
-        dictator = Dictator(Models(), cfg.dictation, vocabulary=Vocabulary(VOCABULARY_PATH))
+        dictator = Dictator(Models(), cfg.dictation, vocabulary=Vocabulary(VOCABULARY_PATH), language=cfg.language)
         result = asdict(dictator.dictate(audio, **context))
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
