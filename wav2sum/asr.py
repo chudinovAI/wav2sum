@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 MODEL_ID = "ai-sage/GigaAM-v3"
 REVISION = "e2e_rnnt"
+ENGLISH_MODEL_ID = "mlx-community/parakeet-tdt-0.6b-v2"
 
 MAX_SPAN_SEC = 20.0
 
@@ -54,6 +55,37 @@ class Transcriber:
             warnings.filterwarnings("ignore", message=r".*resized since it had shape.*")
             encoded, enc_len = self.model.forward(wav.to(self.device), lengths.to(self.device))
         return self.model.decoding.decode(self.cpu_head, encoded.float().cpu(), enc_len.cpu())
+
+
+class EnglishTranscriber:
+    """Parakeet TDT on MLX; same interface as `Transcriber`."""
+
+    def __init__(self, lock: "threading.Lock | None" = None):
+        from parakeet_mlx import from_pretrained
+
+        self.lock = lock or threading.Lock()
+        logger.info("Loading Parakeet …")
+        self.model = from_pretrained(ENGLISH_MODEL_ID)
+
+    def transcribe(self, audio: np.ndarray) -> str:
+        return self.transcribe_spans(audio, [(0.0, len(audio) / SAMPLE_RATE)])[0]
+
+    def transcribe_spans(self, audio: np.ndarray, spans: list[tuple[float, float]]) -> list[str]:
+        # One span at a time: the encoder takes no lengths, so padding a batch would leak into the features.
+        import mlx.core as mx
+        from parakeet_mlx.audio import get_logmel
+
+        config = self.model.preprocessor_config
+        texts = []
+        for start, end in spans:
+            clip = audio[int(start * SAMPLE_RATE) : int(end * SAMPLE_RATE)]
+            if len(clip) < config.hop_length:
+                texts.append("")
+                continue
+            with self.lock:
+                mel = get_logmel(mx.array(clip, dtype=mx.float32), config)
+                texts.append(self.model.generate(mel)[0].text.strip())
+        return texts
 
 
 def _batches(spans: list[tuple[float, float]]):

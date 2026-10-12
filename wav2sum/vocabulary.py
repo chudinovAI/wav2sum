@@ -68,7 +68,7 @@ def corrections(original: str, edited: str) -> list[tuple[str, str]]:
         heard = " ".join(_bare(w) for w in before[i1:i2])
         written = " ".join(_bare(w) for w in after[j1:j2])
         sentence_start = j1 == 0 or after[j1 - 1].endswith((".", "!", "?", "…"))
-        if heard and written and _is_term(written, sentence_start) and _sounds_alike(heard, written):
+        if heard and written and _is_term(heard, written, sentence_start) and _sounds_alike(heard, written):
             pairs.append((heard, written))
     return pairs
 
@@ -77,10 +77,10 @@ def _bare(word: str) -> str:
     return word.strip(PUNCTUATION)
 
 
-def _is_term(word: str, sentence_start: bool) -> bool:
-    return bool(
-        re.search(r"[A-Za-z]", word) or any(c.isupper() for c in word[1:]) or (word[0].isupper() and not sentence_start)
-    )
+def _is_term(heard: str, word: str, sentence_start: bool) -> bool:
+    """Latin spelling counts only as a fix of Cyrillic, so English edits like "there" → "their" aren't learned."""
+    latin_fix = re.search(r"[A-Za-z]", word) and re.search(r"[А-Яа-яЁё]", heard)
+    return bool(latin_fix or any(c.isupper() for c in word[1:]) or (word[0].isupper() and not sentence_start))
 
 
 def _sounds_alike(heard: str, written: str) -> bool:

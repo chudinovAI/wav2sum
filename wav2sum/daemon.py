@@ -55,7 +55,11 @@ class Daemon:
         self.models = Models()
         shared = cfg.model == cfg.dictation.model
         self.dictator = Dictator(
-            self.models, cfg.dictation, num_ctx=cfg.num_ctx if shared else 4096, vocabulary=Vocabulary(VOCABULARY_PATH)
+            self.models,
+            cfg.dictation,
+            num_ctx=cfg.num_ctx if shared else 4096,
+            vocabulary=Vocabulary(VOCABULARY_PATH),
+            language=cfg.language,
         )
         self.summary_llm = LLM(cfg.model, num_ctx=cfg.num_ctx, think=True, keep_alive=-1 if shared else "1m")
         self.recorder: CallRecorder | None = None
@@ -277,6 +281,7 @@ class Daemon:
                     self.cfg.output_dir,
                     llm=self.summary_llm,
                     names=Names(self.cfg.me, self.cfg.them),
+                    language=self.cfg.language,
                     vocabulary=Vocabulary(VOCABULARY_PATH),
                     dictionary=self.cfg.dictation.dictionary,
                     on_stage=lambda stage, job=job: self.loop.call_soon_threadsafe(self._update, job, "running", stage),

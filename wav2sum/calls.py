@@ -8,8 +8,10 @@ from pathlib import Path
 import numpy as np
 
 from wav2sum.audio import SAMPLE_RATE, file_hash, load_audio
+from wav2sum.config import AUTO
 from wav2sum.conversation import Piece, Utterance, build_conversation, drop_echo, format_transcript, split_by_turns
 from wav2sum.echo import suppress_echo
+from wav2sum.language import RU
 from wav2sum.llm import LLM
 from wav2sum.models import Models
 from wav2sum.summarizer import summarize
@@ -17,7 +19,7 @@ from wav2sum.vocabulary import Vocabulary
 
 logger = logging.getLogger(__name__)
 
-CACHE_VERSION = 5
+CACHE_VERSION = 6
 
 CALL = "call"
 MONO = "mono"
@@ -62,6 +64,7 @@ class Names:
 class Result:
     out_dir: Path
     layout: str
+    language: str
     duration_sec: float
     utterances: list[Utterance]
     summary: str
@@ -89,6 +92,7 @@ def process(
     layout: str | None = None,
     speakers: Speakers | None = None,
     names: Names | None = None,
+    language: str = AUTO,
     vocabulary: Vocabulary | None = None,
     dictionary: Sequence[str] = (),
     use_cache: bool = True,
@@ -102,10 +106,15 @@ def process(
 
     on_stage("Transcribing")
     started = time.monotonic()
-    params = {"version": CACHE_VERSION, "layout": layout, **asdict(speakers)}
+    params = {"version": CACHE_VERSION, "layout": layout, "language": language, **asdict(speakers)}
     cache_file = out_root / ".cache" / file_hash(audio_path) / "utterances.json" if use_cache else None
     audio = load_audio(audio_path, channels=2 if layout == CALL else 1)
-    utterances = _cached(cache_file, params, lambda: transcribe(audio, layout, speakers, models))
+
+    def compute() -> tuple[list[Utterance], str]:
+        detected = detect_language(audio, models) if language == AUTO else language
+        return transcribe(audio, layout, speakers, models, detected), detected
+
+    utterances, language = _cached(cache_file, params, compute)
     timings["transcription"] = time.monotonic() - started
 
     conversation = build_conversation(
@@ -117,31 +126,39 @@ def process(
         on_stage("Summarizing")
         started = time.monotonic()
         terms = list(dict.fromkeys([*dictionary, *vocabulary.words]))
-        summary = summarize(format_transcript(conversation, timestamps=False), llm, terms)
+        summary = summarize(format_transcript(conversation, timestamps=False), llm, terms, language)
         timings["summarization"] = time.monotonic() - started
 
-    result = Result(out_root / audio_path.stem, layout, len(audio) / SAMPLE_RATE, conversation, summary, timings)
+    duration = len(audio) / SAMPLE_RATE
+    result = Result(out_root / audio_path.stem, layout, language, duration, conversation, summary, timings)
     _write(result, audio_path, llm)
     return result
 
 
-def transcribe(audio: np.ndarray, layout: str, speakers: Speakers, models: Models) -> list[Utterance]:
+def detect_language(audio: np.ndarray, models: Models) -> str:
+    mixed = audio.mean(axis=1)
+    return models.lid.detect(mixed, models.vad.speech_spans(mixed))
+
+
+def transcribe(
+    audio: np.ndarray, layout: str, speakers: Speakers, models: Models, language: str = RU
+) -> list[Utterance]:
     if layout == MONO:
         turns = models.diarizer.diarize(audio[:, 0], speakers.count, speakers.min, speakers.max)
-        return _transcribe_channel(audio[:, 0], turns, SPEAKER, models)
+        return _transcribe_channel(audio[:, 0], turns, SPEAKER, models, language)
 
     mic, system = audio[:, 0], audio[:, 1]
     remote = speakers.without_me()
     turns = None if remote.just_one else models.diarizer.diarize(system, remote.count, remote.min, remote.max)
-    theirs = _transcribe_channel(system, turns, THEM, models)
-    mine = _transcribe_channel(suppress_echo(mic, system), None, ME, models)
+    theirs = _transcribe_channel(system, turns, THEM, models, language)
+    mine = _transcribe_channel(suppress_echo(mic, system), None, ME, models, language)
     return drop_echo(mine, theirs) + theirs
 
 
-def _transcribe_channel(audio: np.ndarray, turns, key: str, models: Models) -> list[Utterance]:
+def _transcribe_channel(audio: np.ndarray, turns, key: str, models: Models, language: str) -> list[Utterance]:
     spans = models.vad.speech_spans(audio)
     pieces = split_by_turns(spans, turns) if turns is not None else [Piece(s, e, None) for s, e in spans]
-    texts = models.asr.transcribe_spans(audio, [(p.start, p.end) for p in pieces])
+    texts = models.asr_for(language).transcribe_spans(audio, [(p.start, p.end) for p in pieces])
     return [
         Utterance(p.start, p.end, text, key if p.speaker is None else f"{key}:{p.speaker}")
         for p, text in zip(pieces, texts, strict=True)
@@ -149,18 +166,20 @@ def _transcribe_channel(audio: np.ndarray, turns, key: str, models: Models) -> l
     ]
 
 
-def _cached(path: Path | None, params: dict, compute: Callable[[], list[Utterance]]) -> list[Utterance]:
+def _cached(
+    path: Path | None, params: dict, compute: Callable[[], tuple[list[Utterance], str]]
+) -> tuple[list[Utterance], str]:
     if path and path.exists():
         payload = json.loads(path.read_text(encoding="utf-8"))
         if payload["params"] == params:
             logger.info("Using cached transcription %s", path)
-            return [Utterance(**u) for u in payload["utterances"]]
-    utterances = compute()
+            return [Utterance(**u) for u in payload["utterances"]], payload["language"]
+    utterances, language = compute()
     if path:
         path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"params": params, "utterances": [asdict(u) for u in utterances]}
+        payload = {"params": params, "language": language, "utterances": [asdict(u) for u in utterances]}
         path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-    return utterances
+    return utterances, language
 
 
 def _write(result: Result, audio_path: Path, llm: LLM | None) -> None:
@@ -171,6 +190,7 @@ def _write(result: Result, audio_path: Path, llm: LLM | None) -> None:
     meta = {
         "audio": str(audio_path.resolve()),
         "layout": result.layout,
+        "language": result.language,
         "duration_sec": round(result.duration_sec, 1),
         "speakers": list(dict.fromkeys(u.speaker for u in result.utterances)),
         "model": llm.model if llm else None,

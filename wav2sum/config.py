@@ -17,6 +17,7 @@ LOG_PATH = STATE_DIR / "daemon.log"
 HISTORY_PATH = STATE_DIR / "dictations.jsonl"
 VOCABULARY_PATH = STATE_DIR / "vocabulary.json"
 MAX_MESSAGE = 64 * 1024 * 1024
+AUTO = "auto"
 
 
 @dataclass
@@ -34,6 +35,7 @@ class DictationConfig:
 class Config:
     me: str = "Я"
     them: str = "Собеседник"
+    language: str = AUTO
     model: str = "gemma4:12b-it-qat"
     num_ctx: int = 16384
     mic: str | None = None
