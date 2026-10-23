@@ -12,8 +12,6 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 
-import ollama
-
 from wav2sum import __version__
 from wav2sum.audio import pcm16_to_float
 from wav2sum.autorecord import CallDetector, watch_inputs
@@ -30,7 +28,7 @@ from wav2sum.config import (
 )
 from wav2sum.dictation import Dictator
 from wav2sum.history import append_dictation
-from wav2sum.llm import LLM
+from wav2sum.llm import LLM, client
 from wav2sum.models import Models
 from wav2sum.vocabulary import Vocabulary
 
@@ -61,7 +59,7 @@ class Daemon:
             vocabulary=Vocabulary(VOCABULARY_PATH),
             language=cfg.language,
         )
-        self.summary_llm = LLM(cfg.model, num_ctx=cfg.num_ctx, think=True, keep_alive=-1 if shared else "1m")
+        self.summary_llm = LLM(cfg.model, num_ctx=cfg.num_ctx, think=True, keep_alive=self.dictator.llm.keep_alive if shared else "1m")
         self.recorder: CallRecorder | None = None
         self.auto_app: str | None = None
         self.recording_lock = asyncio.Lock()
@@ -367,6 +365,6 @@ def _memory_mb() -> int:
 
 def _llm_memory_mb() -> int:
     try:
-        return sum(m.size for m in ollama.ps().models) // 2**20
+        return sum(m.size for m in client(timeout=5).ps().models) // 2**20
     except Exception:
         return 0
