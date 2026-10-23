@@ -61,11 +61,15 @@ class EnglishTranscriber:
     """Parakeet TDT on MLX; same interface as `Transcriber`."""
 
     def __init__(self, lock: "threading.Lock | None" = None):
+        import mlx.core as mx
         from parakeet_mlx import from_pretrained
 
         self.lock = lock or threading.Lock()
         logger.info("Loading Parakeet …")
         self.model = from_pretrained(ENGLISH_MODEL_ID)
+        # Weights load lazily on this thread's stream, and MLX streams are per thread: a weight first touched
+        # from another thread (the decoder's embedding waits for the first non-blank token) fails to evaluate.
+        mx.eval(self.model.parameters())
 
     def transcribe(self, audio: np.ndarray) -> str:
         return self.transcribe_spans(audio, [(0.0, len(audio) / SAMPLE_RATE)])[0]

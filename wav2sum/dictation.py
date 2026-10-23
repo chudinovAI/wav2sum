@@ -205,7 +205,9 @@ class Dictator:
         self.cfg = cfg
         self.vocabulary = vocabulary or Vocabulary()
         self.language = language
-        self.llm = LLM(cfg.model, num_ctx=num_ctx, temperature=0.2, think=False, keep_alive=-1)
+        # The user is waiting on the HUD: past this, the raw text goes out uncleaned.
+        # Unloaded after 10 idle minutes; the first dictation after that pays ~1.5 s to reload.
+        self.llm = LLM(cfg.model, num_ctx=num_ctx, temperature=0.2, think=False, keep_alive="10m", timeout=30)
 
     def warm_up(self) -> None:
         self.models.preload([RU, EN] if self.language == AUTO else [self.language])
