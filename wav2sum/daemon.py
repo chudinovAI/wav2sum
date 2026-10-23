@@ -59,7 +59,8 @@ class Daemon:
             vocabulary=Vocabulary(VOCABULARY_PATH),
             language=cfg.language,
         )
-        self.summary_llm = LLM(cfg.model, num_ctx=cfg.num_ctx, think=True, keep_alive=self.dictator.llm.keep_alive if shared else "1m")
+        keep_alive = self.dictator.llm.keep_alive if shared else "1m"
+        self.summary_llm = LLM(cfg.model, num_ctx=cfg.num_ctx, think=True, keep_alive=keep_alive)
         self.recorder: CallRecorder | None = None
         self.auto_app: str | None = None
         self.recording_lock = asyncio.Lock()
