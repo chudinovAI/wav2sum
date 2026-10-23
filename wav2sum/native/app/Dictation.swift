@@ -76,7 +76,7 @@ final class Hotkey {
 final class Microphone {
     var onLevel: ((Float) -> Void)?
 
-    private let engine = AVAudioEngine()
+    private var engine = AVAudioEngine()
     private let target = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 1, interleaved: false)!
     private var converter: AVAudioConverter?
     private var samples: [Float] = []
@@ -84,8 +84,14 @@ final class Microphone {
 
     func start() throws {
         lock.withLock { samples.removeAll(keepingCapacity: true) }
+        // A long-lived engine keeps the input format it first saw; once the mic's sample rate
+        // changes, installTap raises an Objective-C exception that `try` can't catch.
+        engine = AVAudioEngine()
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
+        guard format.sampleRate > 0, format.channelCount > 0 else {
+            throw NSError(domain: "wav2sum", code: 1, userInfo: [NSLocalizedDescriptionKey: "no input device"])
+        }
         converter = AVAudioConverter(from: format, to: target)
         input.installTap(onBus: 0, bufferSize: 1600, format: format) { [weak self] buffer, _ in
             self?.consume(buffer)
