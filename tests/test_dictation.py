@@ -70,3 +70,76 @@ def test_english_prompt_is_english():
     dictator = Dictator(models=None, cfg=DictationConfig(dictionary=["GigaAM"]))
     prompt = dictator._prompt("cleanup", "chat", language="en")
     assert "You edit voice input" in prompt and "chat message" in prompt and "GigaAM" in prompt
+
+
+class ScriptedLLM:
+    def __init__(self, reply):
+        self.reply = reply
+        self.requests = []
+
+    def chat(self, system, user, examples=()):
+        self.requests.append((system, user))
+        if isinstance(self.reply, Exception):
+            raise self.reply
+        return self.reply(user) if callable(self.reply) else self.reply
+
+
+def _dictator(reply, **cfg):
+    dictator = Dictator(models=None, cfg=DictationConfig(**cfg))
+    dictator.llm = ScriptedLLM(reply)
+    return dictator
+
+
+def test_cleanup_keeps_snippets_and_learned_words():
+    dictator = _dictator(lambda text: "Короче, " + text.removeprefix("ну "), snippets={"мой имейл": "me@example.com"})
+    dictator.vocabulary.learn("Залей на гитхаб", "Залей на GitHub")
+    assert dictator.clean("ну пиши на мой имейл про гитхаб", "default") == "Короче, пиши на me@example.com про GitHub"
+    [(system, user)] = dictator.llm.requests
+    assert user == "ну пиши на ⟦1⟧ про гитхаб"
+    assert "⟦1⟧" in system
+
+
+def test_broken_or_runaway_cleanup_falls_back_to_raw_text():
+    raw = "ну давай созвонимся в пятницу"
+    assert _dictator(TimeoutError("ollama is slow")).clean(raw, "default") == raw
+    assert _dictator("").clean(raw, "default") == raw
+    assert _dictator("Конечно! Вот письмо: " + "бла " * 50).clean(raw, "default") == raw
+
+
+def test_cleanup_off_inserts_raw_text():
+    dictator = _dictator(AssertionError("LLM must not run"), cleanup=False)
+    assert dictator.clean("ну давай созвонимся в пятницу", "email") == "ну давай созвонимся в пятницу"
+
+
+def test_voice_command_rewrites_the_selection():
+    dictator = _dictator("Short text")
+    dictator.models = fake_models("en")
+    dictation = dictator.dictate(np.zeros(16_000), selection="A very long text", command=True)
+    assert (dictation.text, dictation.command, dictation.language) == ("Short text", True, "ru")
+    [(system, user)] = dictator.llm.requests
+    assert system.startswith("Ты — помощник по работе с текстом")
+    assert user == "Текст:\nA very long text\n\nКоманда: привет"
+
+
+def test_silence_gives_empty_text_without_llm():
+    dictator = _dictator(AssertionError("LLM must not run"))
+    dictator.models = fake_models("ru")
+    dictator.models.vad.speech_spans = lambda audio: []
+    dictator.language = AUTO
+    dictation = dictator.dictate(np.zeros(16_000), app="ru.keepcoder.Telegram")
+    assert (dictation.raw, dictation.text, dictation.style, dictation.language) == ("", "", "chat", "ru")
+
+
+def test_snippet_matches_spoken_variants():
+    snippets = {"мой адрес": "Москва, Тверская 1", "ещё раз": "again"}
+    text, expansions = mark_snippets("Мой, адрес. И еще раз", snippets)
+    assert text == "⟦1⟧ И ⟦2⟧"
+    assert expand_snippets(text, expansions) == "Москва, Тверская 1 И again"
+    assert mark_snippets("мой адресат", snippets) == ("мой адресат", [])
+
+
+def test_chat_keeps_ellipsis_and_prefix_overrides_apply():
+    assert _dictator("Ну и ладно...").clean("ну и ладно короче", "chat") == "Ну и ладно..."
+    assert style_for("com.jetbrains.goland", None, {"com.jetbrains.": "notes"}) == "notes"
+    assert style_for(None, "Pull request #8 · GitHub", {}) == "code"
+    assert style_for(None, None, {}) == "default"

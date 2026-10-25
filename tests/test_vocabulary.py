@@ -47,3 +47,25 @@ def test_vocabulary_persists_and_fixes_new_text(tmp_path):
     vocabulary = Vocabulary(path)
     assert vocabulary.words == ["GigaAM"]
     assert vocabulary.apply("Гигаам и гигаамы, гигаам.") == "GigaAM и гигаамы, GigaAM."
+
+
+def test_unreadable_vocabulary_starts_empty(tmp_path):
+    path = tmp_path / "vocabulary.json"
+    path.write_text("{broken")
+    assert Vocabulary(path).pairs == {}
+
+
+def test_relearning_moves_a_word_to_the_end_and_old_ones_fall_off(monkeypatch):
+    monkeypatch.setattr("wav2sum.vocabulary.MAX_PAIRS", 2)
+    vocabulary = Vocabulary()
+    vocabulary.learn("Залей на гитхаб", "Залей на GitHub")
+    vocabulary.learn("Запусти гигаам", "Запусти GigaAM")
+    vocabulary.learn("Залей на гитхаб", "Залей на GitHub")
+    vocabulary.learn("Подними кубернетис", "Подними Kubernetes")
+    assert list(vocabulary.pairs) == ["гитхаб", "кубернетис"]
+
+
+def test_apply_only_replaces_whole_words():
+    vocabulary = Vocabulary()
+    vocabulary.pairs = {"гит хаб": "GitHub"}
+    assert vocabulary.apply("Гит хаб, гит хабу и мой гит хаб.") == "GitHub, гит хабу и мой GitHub."
