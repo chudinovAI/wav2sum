@@ -18,10 +18,10 @@ Accessibility, Input Monitoring, and System Audio Recording.
 
 ## Usage
 
-- **Dictation.** Hold right ⌥, speak, release, and the text is copied to the clipboard; paste it with ⌘V. Double-tap for
-  hands-free mode; Esc cancels.
+- **Dictation.** Hold right ⌥, speak, release, and the text is pasted at the cursor and stays on the clipboard; if you
+  switch apps before it is ready, it is only copied. Double-tap for hands-free mode; Esc cancels.
 - **Edit by voice.** Select some text, hold ⇧ + right ⌥, and say what to do ("make it shorter", "translate to English");
-  the result is copied to the clipboard.
+  the result replaces the selection.
 - **Calls.** Recording starts by itself when Zoom, Teams, or Webex takes the microphone and stops once the call ends.
   To record anything else, choose "Record Call" in the menu bar, then "Stop Recording". The transcript and summary
   show up in `~/wav2sum/output/`.
