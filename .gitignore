@@ -11,3 +11,5 @@ output/
 *.ogg
 .ruff_cache/
 .coverage
+.env
+.env.*
