@@ -72,3 +72,5 @@ CI (`.github/workflows/ci.yml`) runs the same commands on `macos-15`. On Linux, 
 <!-- When the agent makes the same mistake two times, add a rule here.
      Write the prohibition first, then the reason. Example:
      - Do not edit migrations/. These files are already applied on production. -->
+
+- Do not add "Generated with Claude Code" or similar lines to PR descriptions, commit messages or GitHub comments, and do not add Claude as a co-author (`Co-Authored-By`, `Claude-Session` trailers). I am the only author of the commits.
