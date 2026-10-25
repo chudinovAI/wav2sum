@@ -12,7 +12,7 @@ final class Hotkey {
     }
 
     var key: Key = .rightOption
-    var onPress: ((_ shift: Bool) -> Void)?
+    var onPress: ((_ shift: Bool, _ control: Bool) -> Void)?
     var onRelease: (() -> Void)?
     var onKeyDown: ((_ keyCode: Int64) -> Void)?
 
@@ -61,7 +61,7 @@ final class Hotkey {
             if pressed && !isDown {
                 isDown = true
                 Log.write("hotkey down")
-                onPress?(event.flags.contains(.maskShift))
+                onPress?(event.flags.contains(.maskShift), event.flags.contains(.maskControl))
             } else if !pressed && isDown {
                 isDown = false
                 Log.write("hotkey up")
@@ -125,7 +125,7 @@ final class Microphone {
 }
 
 final class HUD {
-    enum State { case listening(command: Bool), thinking, success }
+    enum State { case listening(command: Bool, translate: Bool), thinking, success }
 
     private let panel: NSPanel
     private let label = NSTextField(labelWithString: "")
@@ -165,8 +165,8 @@ final class HUD {
         panel.alphaValue = 1
         check.isHidden = true
         switch state {
-        case .listening(let command):
-            label.stringValue = command ? "● Command" : "● Listening"
+        case .listening(let command, let translate):
+            label.stringValue = command ? "● Command" : translate ? "● English" : "● Listening"
             label.textColor = .systemRed
             meter.isHidden = false
             meter.reset()
@@ -463,6 +463,7 @@ final class DictationController {
     private var lastTapAt = Date.distantPast
     private var context: JSON = [:]
     private var command = false
+    private var translate = false
 
     private let tapWindow = 0.3
     private let doubleTapWindow = 0.4
@@ -470,12 +471,12 @@ final class DictationController {
     init(daemon: DaemonClient) {
         self.daemon = daemon
         mic.onLevel = { [weak self] in self?.hud.level($0) }
-        hotkey.onPress = { [weak self] in self?.pressed(shift: $0) }
+        hotkey.onPress = { [weak self] in self?.pressed(shift: $0, control: $1) }
         hotkey.onRelease = { [weak self] in self?.released() }
         hotkey.onKeyDown = { [weak self] in self?.keyDown($0) }
     }
 
-    private func pressed(shift: Bool) {
+    private func pressed(shift: Bool, control: Bool) {
         guard isEnabled else {
             Log.write("hotkey ignored: daemon not ready")
             return
@@ -484,7 +485,7 @@ final class DictationController {
         case .idle:
             pressedAt = Date()
             let doubleTap = pressedAt.timeIntervalSince(lastTapAt) < doubleTapWindow
-            begin(command: shift, handsFree: doubleTap)
+            begin(command: shift, translate: control && !shift, handsFree: doubleTap)
         case .handsFree:
             finish()
         case .recording, .processing:
@@ -510,10 +511,11 @@ final class DictationController {
         }
     }
 
-    private func begin(command: Bool, handsFree: Bool) {
+    private func begin(command: Bool, translate: Bool, handsFree: Bool) {
         corrections.finish()
         self.command = command
-        context = ["app": FocusedApp.bundleID ?? "", "title": FocusedApp.windowTitle ?? "", "command": command]
+        self.translate = translate
+        context = ["app": FocusedApp.bundleID ?? "", "title": FocusedApp.windowTitle ?? "", "command": command, "translate": translate]
         if command {
             FocusedApp.selectedText { [weak self] text in self?.context["selection"] = text ?? "" }
         }
@@ -524,7 +526,7 @@ final class DictationController {
             return
         }
         phase = handsFree ? .handsFree : .recording
-        hud.show(.listening(command: command))
+        hud.show(.listening(command: command, translate: translate))
         onBusyChange?(true)
     }
 
@@ -557,7 +559,7 @@ final class DictationController {
                 Clipboard.copy(text)
                 if FocusedApp.bundleID == self.context["app"] as? String { Keyboard.press(9, flags: .maskCommand) }
                 self.hud.show(.success)
-                if !self.command { self.corrections.track(text) }
+                if !self.command && !self.translate { self.corrections.track(text) }
             } else {
                 self.hud.hide()
                 if let error = reply["error"] as? String {

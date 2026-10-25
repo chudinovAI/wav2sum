@@ -135,6 +135,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         let key = dictation.hotkey.key.label
         menu.addItem(disabled(isReady ? "Dictation: hold \(key)  ·  double-tap for hands-free" : "Dictation unavailable"))
         if isReady { menu.addItem(disabled("Edit selection: ⇧ + \(key)")) }
+        if isReady { menu.addItem(disabled("Dictate in English: ⌃ + \(key)")) }
         for warning in permissionWarnings() {
             menu.addItem(warning)
         }
