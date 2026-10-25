@@ -16,6 +16,7 @@ CI (`.github/workflows/ci.yml`) runs ruff on Linux and the tests (with coverage,
 - SPEC.md has the goal, the criteria for "done", the list of things that we do not do and the current architecture.
 - PLAN.md has the steps for the current task. Each step has a check.
 - Tasks live in Linear: project [wav2sum](https://linear.app/wasted-potentials/project/wav2sum-fa518c5db805), team "chudinov projects" (`CHU`). Name branches and PRs after the issue, for example `CHU-104`.
+- When you open a PR, move the Linear issue to In Review and attach the PR link. After the merge, move it to Done.
 - At the start of a session, read this file, SPEC.md and PLAN.md.
 - Do not keep project knowledge only in the chat. If the next session must know a fact, tell me and write a proposed line for this file.
 
