@@ -104,3 +104,10 @@ def test_clock_and_hotkey_labels():
     assert (tui._clock(65), tui._clock(3725)) == ("01:05", "1:02:05")
     assert tui._hotkey_label("right_option") == "right ⌥"
     assert tui._hotkey_label("f13") == "f13"
+
+
+def test_dictation_shows_its_mode():
+    entry = {"time": "2026-10-25T10:00:00+03:00", "text": "Hi", "raw": "привет", "style": "chat"}
+    assert "· chat" in tui._dictation_markdown(entry)
+    assert "· command" in tui._dictation_markdown({**entry, "command": True})
+    assert "· translate" in tui._dictation_markdown({**entry, "translate": True})

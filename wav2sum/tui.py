@@ -344,7 +344,7 @@ def _call_markdown(folder: Path) -> str:
 
 def _dictation_markdown(entry: dict) -> str:
     timings = entry.get("timings", {})
-    mode = "command" if entry.get("command") else entry.get("style", "")
+    mode = "command" if entry.get("command") else "translate" if entry.get("translate") else entry.get("style", "")
     return (
         f"**{entry['time'][:19].replace('T', ' ')}** · `{entry.get('app') or '—'}` · {mode}\n\n"
         f"{entry['text']}\n\n---\n\n**Recognized:** {entry['raw']}\n\n"
