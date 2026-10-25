@@ -3,14 +3,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from wav2sum import calls, cli, client, config, models
+from wav2sum import calls, cli, config, models
 from wav2sum.calls import Names, Speakers
 from wav2sum.config import Config
 from wav2sum.conversation import Utterance
 
 
 @pytest.fixture
-def run(tmp_path, monkeypatch):
+def run(tmp_path, monkeypatch, socket_path):
     seen = {}
 
     def fake_process(audio, models, out_root, **kwargs):
@@ -25,7 +25,6 @@ def run(tmp_path, monkeypatch):
     monkeypatch.setattr(calls, "process", fake_process)
     monkeypatch.setattr(models, "Models", lambda device=None: SimpleNamespace(device=device))
     monkeypatch.setattr(config, "VOCABULARY_PATH", tmp_path / "vocabulary.json")
-    monkeypatch.setattr(client, "SOCKET_PATH", tmp_path / "missing.sock")
 
     def main(*argv):
         monkeypatch.setattr(sys, "argv", ["wav2sum", *argv])

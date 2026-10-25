@@ -4,15 +4,14 @@ import json
 import pytest
 from textual.widgets import DataTable, Markdown, Static
 
-from wav2sum import client, history, tui
+from wav2sum import history, tui
 from wav2sum.config import Config
 from wav2sum.history import append_dictation, load_dictations
 
 
 @pytest.fixture
-def app(tmp_path, monkeypatch):
+def app(tmp_path, monkeypatch, socket_path):
     dictations = tmp_path / "dictations.jsonl"
-    monkeypatch.setattr(client, "SOCKET_PATH", tmp_path / "missing.sock")
     monkeypatch.setattr(history, "CAN_TRASH", False)
     monkeypatch.setattr(tui, "LOG_PATH", tmp_path / "daemon.log")
     monkeypatch.setattr(tui, "load_dictations", lambda: load_dictations(dictations))
