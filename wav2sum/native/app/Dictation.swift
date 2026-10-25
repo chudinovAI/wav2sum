@@ -555,6 +555,7 @@ final class DictationController {
             if let text = reply["text"] as? String, !text.isEmpty {
                 Log.write("copying \(text.count) chars to the clipboard")
                 Clipboard.copy(text)
+                if FocusedApp.bundleID == self.context["app"] as? String { Keyboard.press(9, flags: .maskCommand) }
                 self.hud.show(.success)
                 if !self.command { self.corrections.track(text) }
             } else {
