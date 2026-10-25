@@ -168,6 +168,7 @@ class Daemon:
             title=request.get("title"),
             selection=request.get("selection"),
             command=request.get("command", False),
+            translate=request.get("translate", False),
         )
         entry = {
             "time": datetime.now().astimezone().isoformat(timespec="seconds"),
