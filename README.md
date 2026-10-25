@@ -22,6 +22,8 @@ Accessibility, Input Monitoring, and System Audio Recording.
   switch apps before it is ready, it is only copied. Double-tap for hands-free mode; Esc cancels.
 - **Edit by voice.** Select some text, hold ⇧ + right ⌥, and say what to do ("make it shorter", "translate to English");
   the result replaces the selection.
+- **Dictate in English.** Hold ⌃ + right ⌥ and speak Russian or English; clean English text is pasted at the cursor.
+  If the local LLM fails, nothing is pasted and you hear a beep.
 - **Calls.** Recording starts by itself when Zoom, Teams, or Webex takes the microphone and stops once the call ends.
   To record anything else, choose "Record Call" in the menu bar, then "Stop Recording". The transcript and summary
   show up in `~/wav2sum/output/`.
