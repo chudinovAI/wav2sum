@@ -62,5 +62,5 @@ Create a Certificate…, name `wav2sum`, identity type Self-Signed Root, certifi
 ## Development
 
 ```bash
-uv run pytest && uv run ruff check && uv run ruff format --check
+uv run pytest --cov && uv run ruff check && uv run ruff format --check
 ```

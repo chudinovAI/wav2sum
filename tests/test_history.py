@@ -42,3 +42,30 @@ def test_deleting_a_call_takes_our_recording_but_not_users_file(tmp_path, monkey
 
     assert not ours.exists() and not ours.with_suffix(".json").exists()
     assert theirs.exists()
+
+
+def test_history_is_capped_and_missing_file_is_empty(tmp_path):
+    path = tmp_path / "dictations.jsonl"
+    assert load_dictations(path) == []
+    assert not delete_dictation({"text": "x"}, path)
+    for i in range(5):
+        append_dictation({"text": str(i)}, path)
+    assert [e["text"] for e in load_dictations(path, limit=3)] == ["4", "3", "2"]
+
+
+def test_deleting_one_of_two_identical_dictations_keeps_the_other(tmp_path):
+    path = tmp_path / "dictations.jsonl"
+    entry = {"time": "10:00", "text": "Да"}
+    append_dictation(entry, path)
+    append_dictation(entry, path)
+    assert delete_dictation(entry, path)
+    assert load_dictations(path) == [entry]
+
+
+def test_deleting_a_call_whose_audio_is_gone(tmp_path, monkeypatch):
+    monkeypatch.setattr(history, "CAN_TRASH", False)
+    folder = tmp_path / "output" / "call-1"
+    folder.mkdir(parents=True)
+    (folder / "meta.json").write_text(json.dumps({"audio": str(tmp_path / "recordings" / "call-1.wav")}))
+    delete_call(folder, tmp_path / "recordings")
+    assert not folder.exists()

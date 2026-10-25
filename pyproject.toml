@@ -31,8 +31,23 @@ build-backend = "hatchling.build"
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
+    "pytest-timeout>=2.4.0",
     "ruff>=0.16.9",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--strict-markers", "--strict-config"]
+timeout = 120
+
+[tool.coverage.run]
+source = ["wav2sum"]
+
+[tool.coverage.report]
+skip_covered = true
+fail_under = 80
+show_missing = true
 
 [tool.ruff]
 line-length = 120

@@ -32,3 +32,31 @@ def test_no_glossary_without_terms():
     llm = FakeLLM()
     summarize("Я: привет", llm)
     assert "Термины" not in llm.prompts[0]
+
+
+def test_english_call_gets_english_prompts():
+    llm = FakeLLM()
+    summarize("Me: hi", llm, ["GigaAM"], language="en")
+    assert llm.prompts[0].startswith("You write a summary")
+    assert "spell them exactly like this: GigaAM." in llm.prompts[0]
+
+
+def test_long_call_is_summarized_from_notes_on_its_parts():
+    class Recording(FakeLLM):
+        def chat(self, system, user, examples=()):
+            self.prompts.append(system)
+            self.users = [*getattr(self, "users", []), user]
+            return f"заметка {len(self.prompts)}"
+
+    llm = Recording(num_ctx=4096 + 100)
+    assert summarize("\n\n".join(["Я: " + "слово " * 30] * 10), llm) == f"заметка {len(llm.prompts)}"
+    *parts, final = llm.users
+    assert all(p.startswith("Я: ") for p in parts)
+    assert final.startswith("Заметки по частям созвона:\n\n--- Часть 1 ---\nзаметка 1")
+    assert all("Это только ЧАСТЬ встречи" in p for p in llm.prompts[:-1])
+    assert "Это только ЧАСТЬ встречи" not in llm.prompts[-1]
+
+
+def test_an_utterance_longer_than_a_chunk_is_kept_whole():
+    long = "Я: " + "слово " * 100
+    assert chunk_transcript(f"Я: да\n\n{long}\n\nОн: нет", max_chars=50) == ["Я: да", long, "Он: нет"]
