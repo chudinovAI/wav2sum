@@ -1,9 +1,10 @@
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from wav2sum.config import AUTO, DictationConfig
-from wav2sum.dictation import Dictator, expand_snippets, mark_snippets, style_for
+from wav2sum.dictation import STYLES_EN, Dictator, expand_snippets, mark_snippets, style_for
 from wav2sum.vocabulary import Vocabulary
 
 
@@ -143,3 +144,42 @@ def test_chat_keeps_ellipsis_and_prefix_overrides_apply():
     assert style_for("com.jetbrains.goland", None, {"com.jetbrains.": "notes"}) == "notes"
     assert style_for(None, "Pull request #8 · GitHub", {}) == "code"
     assert style_for(None, None, {}) == "default"
+
+
+def test_translation_always_goes_to_the_llm_in_english_style():
+    dictator = _dictator("Hi.", cleanup=False)
+    dictator.models = fake_models("ru")
+    dictation = dictator.dictate(np.zeros(16_000), app="ru.keepcoder.Telegram", translate=True)
+    assert (dictation.raw, dictation.text, dictation.language, dictation.translate) == ("привет", "Hi", "ru", True)
+    [(system, user)] = dictator.llm.requests
+    assert system.startswith("You edit voice input and translate it into English")
+    assert STYLES_EN["chat"] in system
+    assert user == "привет"
+    assert dictator.dictate(np.zeros(16_000)).translate is False
+    assert len(dictator.llm.requests) == 1
+
+
+def test_translation_keeps_snippets_and_learned_words():
+    dictator = _dictator("Write to ⟦1⟧ about GitHub.", snippets={"мой имейл": "me@example.com"}, dictionary=["GigaAM"])
+    dictator.vocabulary.learn("Залей на гитхаб", "Залей на GitHub")
+    assert dictator.translate("напиши на мой имейл про гитхаб", "default") == "Write to me@example.com about GitHub."
+    [(system, user)] = dictator.llm.requests
+    assert user == "напиши на ⟦1⟧ про гитхаб"
+    assert "Leave markers like ⟦1⟧" in system and "GigaAM, GitHub." in system and "«гитхаб» → «GitHub»" in system
+
+
+def test_translation_of_english_speech_is_plain_cleanup():
+    dictator = _dictator(AssertionError("LLM must not run"))
+    dictator.models = fake_models("en")
+    dictator.language = "en"
+    assert dictator.dictate(np.zeros(16_000), translate=True).text == "hello"
+
+
+def test_broken_or_runaway_translation_raises():
+    raw = "ну давай созвонимся в пятницу"
+    with pytest.raises(TimeoutError):
+        _dictator(TimeoutError("ollama is slow")).translate(raw, "default")
+    with pytest.raises(ValueError):
+        _dictator("").translate(raw, "default")
+    with pytest.raises(ValueError):
+        _dictator("Sure! Here is the email: " + "bla " * 50).translate(raw, "default")
