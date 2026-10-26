@@ -154,7 +154,13 @@ def test_dictation_reaches_history_and_subscribers(tmp_path, monkeypatch, socket
 
         [(received, context)] = heard
         np.testing.assert_allclose(received, audio, atol=1e-4)
-        assert context == {"app": "ru.keepcoder.Telegram", "title": None, "selection": None, "command": False}
+        assert context == {
+            "app": "ru.keepcoder.Telegram",
+            "title": None,
+            "selection": None,
+            "command": False,
+            "translate": False,
+        }
         assert [entry["raw"] for entry in history] == ["привет"]
 
     asyncio.run(scenario())
@@ -176,6 +182,27 @@ def test_silence_is_not_saved_to_history(tmp_path, monkeypatch):
 
     asyncio.run(scenario())
     assert history == []
+
+
+def test_translate_reaches_the_dictator(tmp_path, monkeypatch):
+    monkeypatch.setattr(daemon, "append_dictation", lambda entry: None)
+    heard = []
+
+    async def scenario():
+        d = _daemon(tmp_path, monkeypatch, asyncio.Queue())
+        d.ready.set()
+
+        def dictate(audio, **context):
+            heard.append(context["translate"])
+            return Dictation("привет", "Hi", "chat", "ru", False, {"asr": 0, "llm": 0}, True)
+
+        monkeypatch.setattr(d.dictator, "dictate", dictate)
+        audio = base64.b64encode(np.zeros(1600, "<i2").tobytes()).decode()
+        reply = await d._handle({"cmd": "dictate", "audio": audio, "translate": True}, None)
+        assert (reply["text"], reply["translate"]) == ("Hi", True)
+
+    asyncio.run(scenario())
+    assert heard == [True]
 
 
 def test_processing_a_missing_file_fails_and_an_existing_one_is_queued(tmp_path, monkeypatch):
