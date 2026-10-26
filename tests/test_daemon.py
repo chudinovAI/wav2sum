@@ -271,6 +271,22 @@ def test_jobs_run_after_models_load_and_report_failures(tmp_path, monkeypatch):
     asyncio.run(scenario())
 
 
+def test_a_failed_warm_up_is_logged(tmp_path, monkeypatch, caplog):
+    async def scenario():
+        d = _daemon(tmp_path, monkeypatch, asyncio.Queue())
+
+        def broken():
+            raise RuntimeError("Tensor on device cpu is not on the expected device meta!")
+
+        monkeypatch.setattr(d.dictator, "warm_up", broken)
+        await d._warm_up()
+        assert not d.ready.is_set()
+
+    asyncio.run(scenario())
+    assert "Loading models failed" in caplog.text
+    assert "expected device meta" in caplog.text
+
+
 def test_learning_can_be_turned_off(tmp_path, monkeypatch):
     async def scenario():
         d = _daemon(tmp_path, monkeypatch, asyncio.Queue())

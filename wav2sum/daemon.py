@@ -256,7 +256,11 @@ class Daemon:
                 calls.dismiss()
 
     async def _warm_up(self) -> None:
-        await asyncio.to_thread(self.dictator.warm_up)
+        try:
+            await asyncio.to_thread(self.dictator.warm_up)
+        except Exception:
+            logger.exception("Loading models failed")
+            return
         self.ready.set()
         logger.info("Models ready (%d MB).", _memory_mb())
         self._broadcast({"event": "state", "state": "ready"})
