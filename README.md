@@ -8,10 +8,11 @@ A local Krisp + Wispr Flow for macOS: call recording with a summary, and voice d
 
 ```bash
 uv tool install -e .
-ollama pull gemma4:e4b-it-qat
-ollama pull gemma4:12b-it-qat
 wav2sum app
 ```
+
+The LLMs run in-process on MLX; on first use they download from Hugging Face (`mlx-community/gemma-4-E4B-it-qat-4bit`
+for dictation, `mlx-community/gemma-4-12B-it-qat-4bit` for summaries) and unload after a few idle minutes.
 
 `wav2sum app` puts an icon in the menu bar and starts the background process. On first launch, allow Microphone,
 Accessibility, Input Monitoring, and System Audio Recording.
@@ -43,12 +44,12 @@ Accessibility, Input Monitoring, and System Audio Recording.
 me = "Андрей"
 them = "Илья"
 language = "auto"  # or "ru" / "en"
-model = "gemma4:12b-it-qat"  # summaries
+model = "mlx-community/gemma-4-12B-it-qat-4bit"  # summaries
 auto_record = true
 call_apps = ["us.zoom", "com.microsoft.teams2", "Cisco-Systems.Spark"]  # bundle id prefixes
 
 [dictation]
-model = "gemma4:e4b-it-qat"
+model = "mlx-community/gemma-4-E4B-it-qat-4bit"
 learn = true
 dictionary = ["Kubernetes", "GigaAM"]
 snippets = { "мой имейл" = "me@example.com" }

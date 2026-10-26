@@ -28,7 +28,7 @@
 ## Ограничения
 
 - Python 3.11–3.12, `uv`, `ruff`, `pytest`; Swift для menu bar приложения и захвата звука
-- Модели: GigaAM-v3 (ru), Parakeet MLX (en), pyannote (диаризация), Silero VAD, SpeechBrain (язык), Ollama gemma4 (summary и чистка диктовки)
+- Модели: GigaAM-v3 (ru), Parakeet MLX (en), pyannote (диаризация), Silero VAD, SpeechBrain (язык), gemma4 на mlx-lm внутри процесса (summary и чистка диктовки)
 - Новые зависимости только после вопроса
 - Задачи в Linear: проект [wav2sum](https://linear.app/wasted-potentials/project/wav2sum-fa518c5db805)
 
@@ -38,7 +38,7 @@
 
 - **Процессы.** Swift menu bar приложение (`native/app/`) запускает Python-демон (`daemon.py`) и общается с ним по Unix-сокету `~/Library/Application Support/wav2sum/daemon.sock` строками JSON. Команды: `status`, `subscribe`, `dictate` (с полями `command` и `translate` для режима), `correction`, `record_start`, `record_stop`, `process`, `shutdown`. CLI (`cli.py`) и TUI (`tui.py`) ходят в тот же демон через `client.py`.
 - **Модели в памяти.** `models.py` держит ASR, VAD, диаризацию и определение языка; демон грузит их один раз и переиспользует для звонков и диктовки.
-- **Звонки.** `autorecord.py` смотрит, какое приложение держит микрофон, `capture.py` пишет WAV через Swift-хелпер (`native/capture.swift`): микрофон и системный звук отдельными каналами. `calls.py`: подавление эха (`echo.py`) → VAD → диаризация → язык → ASR → сборка реплик (`conversation.py`) → summary (`summarizer.py` через `llm.py`/Ollama). Результат в `~/wav2sum/output/<call>/`: `transcript.txt`, `summary.md`, `meta.json`.
+- **Звонки.** `autorecord.py` смотрит, какое приложение держит микрофон, `capture.py` пишет WAV через Swift-хелпер (`native/capture.swift`): микрофон и системный звук отдельными каналами. `calls.py`: подавление эха (`echo.py`) → VAD → диаризация → язык → ASR → сборка реплик (`conversation.py`) → summary (`summarizer.py` через `llm.py`/mlx-lm). Результат в `~/wav2sum/output/<call>/`: `transcript.txt`, `summary.md`, `meta.json`.
 - **Диктовка.** Swift-приложение пишет звук по ⌥ и шлёт его демону; `dictation.py` распознаёт, чистит текст LLM в стиле под текущее приложение, раскрывает сниппеты; Swift кладёт текст в буфер обмена и вставляет его ⌘V, если приложение под фокусом не сменилось. `vocabulary.py` учится на правках после вставки.
 - **Хранилище.** Конфиг `~/.config/wav2sum/config.toml` (`config.py`), история диктовок и словарь в `~/Library/Application Support/wav2sum/`, удаление через `history.py` (в Корзину).
 
@@ -46,7 +46,7 @@
 
 - **ASR на Neural Engine (CHU-97 → 98, 99, 100, 101, 102).** У `Transcriber` появляется второй бэкенд (Core ML рядом с MPS) и опция `asr_backend`, `.mlpackage` ложится в `~/Library/Application Support/wav2sum/`. Всё решает бенчмарк CHU-99: если WER хуже, эпик закрываем, и архитектура не меняется.
 - **Один lock на все модели (CHU-101).** Сейчас `Models` держит один `threading.Lock`, и диктовка ждёт диаризацию созвона. Делим lock по вычислителю (ANE, GPU, CPU). Имеет смысл только после CHU-100.
-- **Ollama → mlx-lm (CHU-107).** Шов один: класс `LLM` в `llm.py` (`chat`, `unload`), его создают три места (`cli.py`, `daemon.py`, `dictation.py`). Но LLM переезжает внутрь процесса демона: память модели, `keep_alive`, `_llm_memory_mb` и делёж GPU с ASR теперь наша забота, а не Ollama. Это пересекается с CHU-97 и CHU-101, поэтому решить до них.
+- **Ollama → mlx-lm (CHU-107).** Сделано. `llm.py` грузит модель через mlx-lm в процесс демона (или CLI) при первом `chat` и выгружает после `keep_alive` секунд простоя (диктовка 600, summary 60, если модели разные). Все генерации идут по очереди в одном потоке `llm` (MLX-потоки привязаны к треду, GPU один); диктовка, прождавшая дольше `timeout`, отменяется и отдаёт сырой текст. Модели с одинаковым именем делят веса. `status` отдаёт `llm_memory_mb` из размера весов и вычитает его из `memory_mb`. В CHU-101 очередь `llm` становится GPU-lock рядом с lock'ами ASR.
 - **Автовставка после диктовки (CHU-104).** Только Swift: в `Dictation.swift` уже есть `Keyboard.press` и `Clipboard.save/restore`, то есть ⌘V и возврат буфера. Протокол демона не меняется. Проверить, что обучение на правках (`correction`) работает со вставкой так же.
 - **Перевод на английский сразу (CHU-96).** ⌃ + клавиша диктовки (и в hands-free). Swift шлёт `translate: true` в команде `dictate`, демон передаёт его в `Dictator.dictate`; русская речь идёт через `TRANSLATE_PROMPT` с английским стилем приложения, английская — через обычную очистку. Если LLM упала или выдала мусор, ничего не вставляется, приложение пищит. Перевод не учит словарь на правках. В истории у записи есть поле `translate`, TUI показывает режим `translate`.
 - **CI и Dependabot (CHU-106)** идут отдельным треком и архитектуру не трогают.

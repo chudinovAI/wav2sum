@@ -66,7 +66,7 @@ CI (`.github/workflows/ci.yml`) runs ruff on Linux and the tests (with coverage,
 - Do not change how recordings, transcripts, history and `vocabulary.json` are stored or deleted without asking (`history.py`, `calls.py`, `vocabulary.py`). These files are my real calls and dictations, and a mistake loses them for good.
 - Do not change the app's bundle id, signing or `Info.plist` (`build.py`, `wav2sum/native/Info.plist`) without asking. macOS ties Microphone, Accessibility, Input Monitoring and System Audio permissions to them, and a change makes me grant all of them again.
 - Do not change the daemon socket protocol (`daemon.py`, `client.py`, `native/app/Daemon.swift`) on one side only. The Python daemon and the Swift app must change together.
-- Do not send audio or text outside the machine. The project is local by design: models run locally, the LLM is a local Ollama.
+- Do not send audio or text outside the machine. The project is local by design: models run locally, the LLM runs in-process on MLX (mlx-lm).
 
 ## Project rules
 
