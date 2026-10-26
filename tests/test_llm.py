@@ -24,6 +24,7 @@ class FakeMLX:
     def __init__(self, reply="<|channel>thought долго думал<channel|>  ответ \n", seconds=0.0):
         self.reply, self.seconds = reply, seconds
         self.gate = None
+        self.error = None
         self.loads, self.calls = [], []
         self.running = self.most_running = 0
 
@@ -37,6 +38,8 @@ class FakeMLX:
         time.sleep(self.seconds)
         if self.gate:
             self.gate.wait()
+        if self.error:
+            raise self.error
         self.calls.append({"prompt": prompt, "max_tokens": max_tokens, "temp": sampler})
         self.running -= 1
         return self.reply
@@ -178,3 +181,13 @@ def test_a_chat_that_waits_past_its_timeout_gives_up_and_never_runs(mlx):
     mlx.gate.set()
     summary.join()
     assert mlx.loads == ["big"]
+
+
+def test_a_failure_after_the_caller_gave_up_is_logged(mlx, caplog):
+    mlx.gate, mlx.error = threading.Event(), OSError("error decoding response body")
+    with pytest.raises(TimeoutError):
+        LLM("gemma", timeout=0.05).chat("s", "u")
+    mlx.gate.set()
+    llm_module._worker.submit(lambda: None).result()
+    assert "LLM failed after the caller stopped waiting" in caplog.text
+    assert "error decoding response body" in caplog.text
