@@ -1,27 +1,77 @@
-from types import SimpleNamespace
+import sys
+import threading
+import time
+from types import ModuleType, SimpleNamespace
+
+import pytest
 
 from wav2sum import llm as llm_module
 from wav2sum.llm import LLM
 
 
-class FakeClient:
-    def __init__(self):
-        self.calls = []
+class FakeTokenizer:
+    has_thinking = True
+    think_end = "<channel|>"
 
-    def chat(self, **kwargs):
-        self.calls.append(kwargs)
-        return SimpleNamespace(message=SimpleNamespace(content="  ответ \n"))
+    def apply_chat_template(self, messages, add_generation_prompt, enable_thinking):
+        assert add_generation_prompt
+        return {"messages": messages, "thinking": enable_thinking}
 
 
-def test_chat_sends_system_examples_and_options():
-    llm = LLM("gemma", num_ctx=4096, temperature=0.2, think=False, keep_alive="10m")
-    llm.client = FakeClient()
+class FakeMLX:
+    """Stands in for mlx_lm and mlx: records loads and generations."""
+
+    def __init__(self, reply="<|channel>thought долго думал<channel|>  ответ \n", seconds=0.0):
+        self.reply, self.seconds = reply, seconds
+        self.loads, self.calls = [], []
+        self.running = self.most_running = 0
+
+    def load(self, name):
+        self.loads.append(name)
+        return SimpleNamespace(parameters=lambda: {"w": SimpleNamespace(nbytes=3 * 2**20)}), FakeTokenizer()
+
+    def generate(self, model, tokenizer, prompt, max_tokens, sampler):
+        self.running += 1
+        self.most_running = max(self.most_running, self.running)
+        time.sleep(self.seconds)
+        self.calls.append({"prompt": prompt, "max_tokens": max_tokens, "temp": sampler})
+        self.running -= 1
+        return self.reply
+
+
+@pytest.fixture
+def mlx(monkeypatch):
+    fake = FakeMLX()
+    mlx_lm = ModuleType("mlx_lm")
+    mlx_lm.load, mlx_lm.generate = fake.load, fake.generate
+    sample_utils = ModuleType("mlx_lm.sample_utils")
+    sample_utils.make_sampler = lambda temp: temp
+    core = ModuleType("mlx.core")
+    core.eval = core.clear_cache = lambda *_: None
+    utils = ModuleType("mlx.utils")
+    utils.tree_flatten = lambda tree: list(tree.items())
+    mlx = ModuleType("mlx")
+    mlx.core, mlx.utils = core, utils
+    for name, module in {
+        "mlx_lm": mlx_lm,
+        "mlx_lm.sample_utils": sample_utils,
+        "mlx": mlx,
+        "mlx.core": core,
+        "mlx.utils": utils,
+    }.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    yield fake
+    for name in list(llm_module._loaded):
+        llm_module._unload(name)
+
+
+def test_chat_sends_system_examples_and_options_and_drops_the_thinking(mlx):
+    llm = LLM("gemma", num_ctx=4096, temperature=0.2, think=False)
 
     assert llm.chat("будь краток", "привет", [("ну э привет", "Привет."), ("пока", "Пока.")]) == "ответ"
 
-    [call] = llm.client.calls
-    assert call["model"] == "gemma"
-    assert [(m["role"], m["content"]) for m in call["messages"]] == [
+    [call] = mlx.calls
+    assert [(m["role"], m["content"]) for m in call["prompt"]["messages"]] == [
         ("system", "будь краток"),
         ("user", "ну э привет"),
         ("assistant", "Привет."),
@@ -29,12 +79,71 @@ def test_chat_sends_system_examples_and_options():
         ("assistant", "Пока."),
         ("user", "привет"),
     ]
-    assert call["options"] == {"num_ctx": 4096, "temperature": 0.2}
-    assert (call["think"], call["keep_alive"]) == (False, "10m")
+    assert (call["prompt"]["thinking"], call["max_tokens"], call["temp"]) == (False, 4096, 0.2)
 
 
-def test_client_ignores_system_proxy(monkeypatch):
-    made = []
-    monkeypatch.setattr(llm_module.ollama, "Client", lambda **kwargs: made.append(kwargs))
-    LLM("gemma", timeout=30)
-    assert made == [{"timeout": 30, "trust_env": False}]
+def test_think_turns_on_thinking(mlx):
+    LLM("gemma", think=True).chat("s", "u")
+    assert mlx.calls[0]["prompt"]["thinking"] is True
+
+
+def test_reply_without_thinking_is_kept(mlx):
+    mlx.reply = " просто ответ "
+    assert LLM("gemma").chat("s", "u") == "просто ответ"
+
+
+def test_weights_load_once_and_are_shared_by_the_same_model(mlx):
+    LLM("gemma").chat("s", "u")
+    LLM("gemma", think=True).chat("s", "u")
+    LLM("other").chat("s", "u")
+    assert mlx.loads == ["gemma", "other"]
+    assert llm_module.memory_mb() == 6
+
+
+def test_weights_are_freed_after_keep_alive_idle_and_reload_on_the_next_chat(mlx):
+    llm = LLM("gemma", keep_alive=0.05)
+    llm.chat("s", "u")
+    assert llm_module.memory_mb() == 3
+
+    time.sleep(0.2)
+    assert llm_module.memory_mb() == 0
+
+    llm.chat("s", "u")
+    assert mlx.loads == ["gemma", "gemma"]
+
+
+def test_a_chat_resets_the_idle_timer(mlx):
+    llm = LLM("gemma", keep_alive=0.15)
+    for _ in range(3):
+        llm.chat("s", "u")
+        time.sleep(0.1)
+    assert mlx.loads == ["gemma"]
+
+
+def test_unload_frees_the_weights(mlx):
+    llm = LLM("gemma")
+    llm.chat("s", "u")
+    llm.unload()
+    assert llm_module.memory_mb() == 0
+
+
+def test_chats_from_two_threads_run_one_at_a_time(mlx):
+    mlx.seconds = 0.05
+    llm = LLM("gemma")
+    threads = [threading.Thread(target=llm.chat, args=("s", "u")) for _ in range(3)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert (len(mlx.calls), mlx.most_running) == (3, 1)
+
+
+def test_a_chat_that_waits_past_its_timeout_gives_up_and_never_runs(mlx):
+    mlx.seconds = 0.3
+    summary = threading.Thread(target=LLM("big").chat, args=("s", "u"))
+    summary.start()
+    time.sleep(0.05)
+    with pytest.raises(TimeoutError):
+        LLM("small", timeout=0.05).chat("s", "u")
+    summary.join()
+    assert mlx.loads == ["big"]
