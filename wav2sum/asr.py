@@ -5,7 +5,8 @@ import warnings
 
 import numpy as np
 import torch
-from transformers import AutoModel
+from huggingface_hub import hf_hub_download
+from transformers import AutoConfig, AutoModel
 
 from wav2sum.audio import SAMPLE_RATE
 
@@ -26,7 +27,13 @@ class Transcriber:
         self.device = device
         self.lock = lock or threading.Lock()
         logger.info("Loading GigaAM on %s …", device)
-        self.model = AutoModel.from_pretrained(MODEL_ID, revision=REVISION, trust_remote_code=True).model
+        # transformers 5 builds a from_pretrained model on the meta device, and GigaAM's remote code makes real tensors
+        # in __init__; building from the config and loading the weights ourselves keeps it on the CPU.
+        config = AutoConfig.from_pretrained(MODEL_ID, revision=REVISION, trust_remote_code=True)
+        model = AutoModel.from_config(config, trust_remote_code=True)
+        weights = hf_hub_download(MODEL_ID, "pytorch_model.bin", revision=REVISION)
+        model.load_state_dict(torch.load(weights, map_location="cpu", weights_only=True))
+        self.model = model.model
         if device != "cpu":
             # GigaAM already runs the encoder under fp16 autocast off the CPU; fp16 weights just save ~0.6 GB.
             self.model.encoder.half()
