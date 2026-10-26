@@ -23,6 +23,7 @@ class FakeMLX:
 
     def __init__(self, reply="<|channel>thought долго думал<channel|>  ответ \n", seconds=0.0):
         self.reply, self.seconds = reply, seconds
+        self.gate = None
         self.loads, self.calls = [], []
         self.running = self.most_running = 0
 
@@ -34,14 +35,41 @@ class FakeMLX:
         self.running += 1
         self.most_running = max(self.most_running, self.running)
         time.sleep(self.seconds)
+        if self.gate:
+            self.gate.wait()
         self.calls.append({"prompt": prompt, "max_tokens": max_tokens, "temp": sampler})
         self.running -= 1
         return self.reply
 
 
+TIMERS = []
+
+
+class FakeTimer:
+    """Fires only when the test says so, so idle unloads do not depend on the runner's speed."""
+
+    def __init__(self, seconds, fire):
+        self.seconds, self.fire, self.cancelled = seconds, fire, False
+        TIMERS.append(self)
+
+    def start(self):
+        pass
+
+    def cancel(self):
+        self.cancelled = True
+
+
+def _idle_timeout_passes():
+    [timer] = [t for t in TIMERS if not t.cancelled]
+    timer.fire()
+    llm_module._worker.submit(lambda: None).result()
+
+
 @pytest.fixture
 def mlx(monkeypatch):
     fake = FakeMLX()
+    TIMERS.clear()
+    monkeypatch.setattr(llm_module.threading, "Timer", FakeTimer)
     mlx_lm = ModuleType("mlx_lm")
     mlx_lm.load, mlx_lm.generate = fake.load, fake.generate
     sample_utils = ModuleType("mlx_lm.sample_utils")
@@ -101,11 +129,12 @@ def test_weights_load_once_and_are_shared_by_the_same_model(mlx):
 
 
 def test_weights_are_freed_after_keep_alive_idle_and_reload_on_the_next_chat(mlx):
-    llm = LLM("gemma", keep_alive=0.05)
+    llm = LLM("gemma", keep_alive=600)
     llm.chat("s", "u")
     assert llm_module.memory_mb() == 3
+    assert TIMERS[0].seconds == 600
 
-    time.sleep(0.2)
+    _idle_timeout_passes()
     assert llm_module.memory_mb() == 0
 
     llm.chat("s", "u")
@@ -113,10 +142,10 @@ def test_weights_are_freed_after_keep_alive_idle_and_reload_on_the_next_chat(mlx
 
 
 def test_a_chat_resets_the_idle_timer(mlx):
-    llm = LLM("gemma", keep_alive=0.15)
+    llm = LLM("gemma", keep_alive=600)
     for _ in range(3):
         llm.chat("s", "u")
-        time.sleep(0.1)
+    assert [t.cancelled for t in TIMERS] == [True, True, False]
     assert mlx.loads == ["gemma"]
 
 
@@ -139,11 +168,13 @@ def test_chats_from_two_threads_run_one_at_a_time(mlx):
 
 
 def test_a_chat_that_waits_past_its_timeout_gives_up_and_never_runs(mlx):
-    mlx.seconds = 0.3
+    mlx.gate = threading.Event()
     summary = threading.Thread(target=LLM("big").chat, args=("s", "u"))
     summary.start()
-    time.sleep(0.05)
+    while not mlx.running:
+        time.sleep(0.01)
     with pytest.raises(TimeoutError):
         LLM("small", timeout=0.05).chat("s", "u")
+    mlx.gate.set()
     summary.join()
     assert mlx.loads == ["big"]
