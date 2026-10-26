@@ -75,3 +75,4 @@ CI (`.github/workflows/ci.yml`) runs ruff on Linux and the tests (with coverage,
      - Do not edit migrations/. These files are already applied on production. -->
 
 - Do not add "Generated with Claude Code" or similar lines to PR descriptions, commit messages or GitHub comments, and do not add Claude as a co-author (`Co-Authored-By`, `Claude-Session` trailers). I am the only author of the commits.
+- My shell is fish: give me commands in fish syntax (`set VAR value`, `env VAR=value cmd`), not bash.
