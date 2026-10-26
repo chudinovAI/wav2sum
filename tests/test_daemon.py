@@ -40,7 +40,7 @@ def _daemon(tmp_path, monkeypatch, inputs: asyncio.Queue):
     monkeypatch.setattr(daemon, "AUTO_RECORD_TICK", 0.01)
     monkeypatch.setattr(daemon, "VOCABULARY_PATH", tmp_path / "vocabulary.json")
     monkeypatch.setattr(daemon, "_memory_mb", lambda: 512)
-    monkeypatch.setattr(daemon, "_llm_memory_mb", lambda: 0)
+    monkeypatch.setattr(daemon, "memory_mb", lambda: 0)
     d = daemon.Daemon(Config(recordings_dir=tmp_path, output_dir=tmp_path / "output"))
     d.loop, d.queue, d.ready = asyncio.get_running_loop(), asyncio.Queue(), asyncio.Event()
     return d
@@ -92,6 +92,23 @@ def test_corrections_are_learned(tmp_path, monkeypatch):
         assert d.dictator.vocabulary.apply("гитхаб") == "GitHub"
 
     asyncio.run(scenario())
+
+
+def test_status_counts_the_in_process_llm_once(tmp_path, monkeypatch):
+    async def scenario():
+        d = _daemon(tmp_path, monkeypatch, asyncio.Queue())
+        monkeypatch.setattr(daemon, "memory_mb", lambda: 200)
+        status = d.status()
+        assert (status["memory_mb"], status["llm_memory_mb"]) == (312, 200)
+
+    asyncio.run(scenario())
+
+
+def test_summary_model_stays_as_long_as_dictation_when_shared_else_a_minute():
+    assert daemon.Daemon(Config()).summary_llm.keep_alive == 60
+    cfg = Config()
+    cfg.dictation.model = cfg.model
+    assert daemon.Daemon(cfg).summary_llm.keep_alive == 600
 
 
 @contextlib.asynccontextmanager

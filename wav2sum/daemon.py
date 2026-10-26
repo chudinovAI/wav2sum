@@ -28,7 +28,7 @@ from wav2sum.config import (
 )
 from wav2sum.dictation import Dictator
 from wav2sum.history import append_dictation
-from wav2sum.llm import LLM, client
+from wav2sum.llm import LLM, memory_mb
 from wav2sum.models import Models
 from wav2sum.vocabulary import Vocabulary
 
@@ -59,7 +59,7 @@ class Daemon:
             vocabulary=Vocabulary(VOCABULARY_PATH),
             language=cfg.language,
         )
-        keep_alive = self.dictator.llm.keep_alive if shared else "1m"
+        keep_alive = self.dictator.llm.keep_alive if shared else 60
         self.summary_llm = LLM(cfg.model, num_ctx=cfg.num_ctx, think=True, keep_alive=keep_alive)
         self.recorder: CallRecorder | None = None
         self.auto_app: str | None = None
@@ -145,12 +145,14 @@ class Daemon:
                 raise ValueError(f"unknown command {other!r}")
 
     def status(self) -> dict:
+        llm_mb = memory_mb()
         return {
             "version": __version__,
             "pid": os.getpid(),
             "state": "ready" if self.ready.is_set() else "loading",
-            "memory_mb": _memory_mb(),
-            "llm_memory_mb": _llm_memory_mb(),
+            # The LLM now lives in this process, so the footprint already holds it; the app and TUI add the two up.
+            "memory_mb": _memory_mb() - llm_mb,
+            "llm_memory_mb": llm_mb,
             "hotkey": self.cfg.dictation.hotkey,
             "recording": {"path": str(self.recorder.path), "seconds": self.recorder.seconds, "auto": self.auto_app}
             if self.recorder
@@ -363,10 +365,3 @@ def _memory_mb() -> int:
     info = _RusageInfoV2()
     ctypes.CDLL("libproc.dylib").proc_pid_rusage(os.getpid(), 2, ctypes.byref(info))
     return info.phys_footprint // 2**20
-
-
-def _llm_memory_mb() -> int:
-    try:
-        return sum(m.size for m in client(timeout=5).ps().models) // 2**20
-    except Exception:
-        return 0

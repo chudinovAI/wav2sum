@@ -108,7 +108,9 @@ def _add_processing_args(parser: argparse.ArgumentParser, cfg: Config) -> None:
     parser.add_argument(
         "--output-dir", type=Path, default=cfg.output_dir, help=f"where to write results (default: {cfg.output_dir})"
     )
-    parser.add_argument("--model", default=cfg.model, help=f"Ollama model for the summary (default: {cfg.model})")
+    parser.add_argument(
+        "--model", default=cfg.model, help=f"MLX model (Hugging Face repo) for the summary (default: {cfg.model})"
+    )
     parser.add_argument("--no-summary", action="store_true", help="transcript only")
     parser.add_argument("--no-cache", action="store_true", help="ignore the cached transcription")
     parser.add_argument("--device", help="cuda / mps / cpu (default: auto)")

@@ -23,7 +23,7 @@ AUTO = "auto"
 @dataclass
 class DictationConfig:
     hotkey: str = "right_option"
-    model: str = "gemma4:e4b-it-qat"
+    model: str = "mlx-community/gemma-4-E4B-it-qat-4bit"
     cleanup: bool = True
     learn: bool = True
     dictionary: list[str] = field(default_factory=list)
@@ -36,7 +36,7 @@ class Config:
     me: str = "Я"
     them: str = "Собеседник"
     language: str = AUTO
-    model: str = "gemma4:12b-it-qat"
+    model: str = "mlx-community/gemma-4-12B-it-qat-4bit"
     num_ctx: int = 16384
     mic: str | None = None
     recordings_dir: Path = Path("~/wav2sum/recordings")
