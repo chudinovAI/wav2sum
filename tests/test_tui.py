@@ -75,7 +75,10 @@ def test_deleting_a_call_asks_first(app, tmp_path):
 
 def test_deleting_a_dictation(app, tmp_path):
     async def scenario(pilot):
-        await pilot.press("3", "x", "y")
+        # Separate presses: in one press Textual moves on to "x" once the process looks idle, and "x" can
+        # then reach the calls panel before "3" has moved the focus, so the call gets deleted instead.
+        await pilot.press("3")
+        await pilot.press("x", "y")
         await pilot.pause()
         assert _rows(app, "dictations") == []
         assert load_dictations(tmp_path / "dictations.jsonl") == []
