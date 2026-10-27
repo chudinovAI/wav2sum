@@ -32,8 +32,12 @@ class LLM:
         future = _worker.submit(self._generate, messages)
         try:
             return future.result(self.timeout)
-        finally:
-            future.cancel()  # a dictation that gave up waiting behind a summary must not run later
+        except TimeoutError:
+            # A dictation that gave up waiting behind a summary must not run later; one already running
+            # (say, a slow first download) finishes with nobody waiting, so its failure goes to the log.
+            if not future.cancel():
+                future.add_done_callback(_log_failure)
+            raise
 
     def unload(self) -> None:
         _worker.submit(_unload, self.model).result()
@@ -54,6 +58,11 @@ class LLM:
         if tokenizer.has_thinking:
             text = text.rpartition(tokenizer.think_end)[2]
         return text.strip()
+
+
+def _log_failure(future) -> None:
+    if error := future.exception():
+        logger.error("LLM failed after the caller stopped waiting", exc_info=error)
 
 
 def memory_mb() -> int:

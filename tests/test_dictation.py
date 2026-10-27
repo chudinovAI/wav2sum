@@ -28,13 +28,13 @@ def test_short_text_skips_llm_and_chat_drops_final_period():
     assert dictator.clean("Привет.", "email") == "Привет."
 
 
-def test_learned_words_fix_text_and_reach_the_prompt():
+def test_learned_words_fix_text_and_reach_the_prompt_only_as_pairs():
     vocabulary = Vocabulary()
     vocabulary.learn("Залей на гитхаб", "Залей на GitHub")
     dictator = Dictator(models=None, cfg=DictationConfig(dictionary=["GigaAM"]), vocabulary=vocabulary)
     assert dictator.clean("На гитхаб.", "chat") == "На GitHub"
     prompt = dictator._prompt("cleanup", "default")
-    assert "GigaAM, GitHub." in prompt
+    assert "именно так: GigaAM." in prompt
     assert "«гитхаб» → «GitHub»" in prompt
 
 
@@ -165,7 +165,7 @@ def test_translation_keeps_snippets_and_learned_words():
     assert dictator.translate("напиши на мой имейл про гитхаб", "default") == "Write to me@example.com about GitHub."
     [(system, user)] = dictator.llm.requests
     assert user == "напиши на ⟦1⟧ про гитхаб"
-    assert "Leave markers like ⟦1⟧" in system and "GigaAM, GitHub." in system and "«гитхаб» → «GitHub»" in system
+    assert "Leave markers like ⟦1⟧" in system and "like this: GigaAM." in system and "«гитхаб» → «GitHub»" in system
 
 
 def test_translation_of_english_speech_is_plain_cleanup():
