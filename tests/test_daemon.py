@@ -271,6 +271,32 @@ def test_jobs_run_after_models_load_and_report_failures(tmp_path, monkeypatch):
     asyncio.run(scenario())
 
 
+def test_pyannote_is_unloaded_once_the_queue_is_empty(tmp_path, monkeypatch):
+    unloaded = []
+
+    def fake_process(audio, *_, **__):
+        unloaded.append(audio.name)
+        if audio.name == "broken.wav":
+            raise RuntimeError("ffmpeg failed")
+        return type("Result", (), {"out_dir": tmp_path})()
+
+    monkeypatch.setattr(daemon, "process", fake_process)
+
+    async def scenario():
+        d = _daemon(tmp_path, monkeypatch, asyncio.Queue())
+        monkeypatch.setattr(d.models, "unload", unloaded.append)
+        for name in ("good.wav", "broken.wav"):
+            (tmp_path / name).write_bytes(b"")
+            d._enqueue(tmp_path / name)
+        d.ready.set()
+        working = asyncio.create_task(d._work())
+        await asyncio.sleep(0.2)
+        assert unloaded == ["good.wav", "broken.wav", "diarizer"]
+        working.cancel()
+
+    asyncio.run(scenario())
+
+
 def test_a_failed_warm_up_is_logged(tmp_path, monkeypatch, caplog):
     async def scenario():
         d = _daemon(tmp_path, monkeypatch, asyncio.Queue())
