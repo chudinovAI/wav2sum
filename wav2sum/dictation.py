@@ -261,6 +261,8 @@ class Dictator:
         *,
         translate: bool = False,
         stream: "DictationStream | None" = None,
+        before: str | None = None,
+        after: str | None = None,
     ) -> Dictation:
         started = time.monotonic()
         raw, language = stream.finish() if stream else self.recognize(audio)
@@ -279,6 +281,8 @@ class Dictator:
             text = self.translate(raw, style)
         else:
             text = self.clean(raw, style, language)
+        if text and not command:
+            text = fit_to_cursor(text, before or "", after or "", self.cfg.dictionary + self.vocabulary.words)
         timings["llm"] = time.monotonic() - started
         return Dictation(raw, text, style, language, command, timings, translate)
 
@@ -411,6 +415,28 @@ def mark_snippets(text: str, snippets: dict[str, str]) -> tuple[str, list[str]]:
 def expand_snippets(text: str, expansions: list[str]) -> str:
     for i, expansion in enumerate(expansions, 1):
         text = text.replace(f"⟦{i}⟧", expansion)
+    return text
+
+
+def fit_to_cursor(text: str, before: str, after: str, keep: list[str]) -> str:
+    """Fits a dictation into the text around the cursor: mid-sentence it starts lowercase, after a word or a mark it
+    starts with a space, and before the rest of a phrase it has no final period."""
+    head = before.rstrip(" \t")
+    word = re.match(r"\w*", text)[0]
+    if (
+        head
+        and not head.endswith((".", "!", "?", "…", "\n"))
+        and word[:1].isupper()
+        and word[1:] == word[1:].lower()
+        and word != "I"
+        and not any(text.startswith(w) for w in keep)
+    ):
+        text = text[0].lower() + text[1:]
+    if before and (before[-1].isalnum() or before[-1] in ".,;:!?…)»”"):
+        text = " " + text
+    tail = after.lstrip(" \t")
+    if tail and tail[0] != "\n" and not tail[0].isupper():
+        text = _drop_final_period(text)
     return text
 
 

@@ -169,7 +169,7 @@ def test_dictation_reaches_history_and_subscribers(tmp_path, monkeypatch, socket
             await asyncio.sleep(0.05)
 
             audio = np.linspace(-1, 1, 16_000, dtype=np.float32)
-            reply = await dictating.dictate(audio, app="ru.keepcoder.Telegram", command=False)
+            reply = await dictating.dictate(audio, app="ru.keepcoder.Telegram", command=False, before="Я думаю")
             assert (reply["text"], reply["seconds"], reply["app"]) == ("Привет", 1.0, "ru.keepcoder.Telegram")
 
             event = await asyncio.wait_for(next_event, timeout=5)
@@ -183,6 +183,8 @@ def test_dictation_reaches_history_and_subscribers(tmp_path, monkeypatch, socket
             "selection": None,
             "command": False,
             "translate": False,
+            "before": "Я думаю",
+            "after": None,
         }
         assert [entry["raw"] for entry in history] == ["привет"]
 

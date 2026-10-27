@@ -10,6 +10,7 @@ from wav2sum.dictation import (
     DictationStream,
     Dictator,
     expand_snippets,
+    fit_to_cursor,
     mark_snippets,
     style_for,
 )
@@ -160,6 +161,34 @@ def test_silence_gives_empty_text_without_llm():
     dictator.language = AUTO
     dictation = dictator.dictate(np.zeros(16_000), app="ru.keepcoder.Telegram")
     assert (dictation.raw, dictation.text, dictation.style, dictation.language) == ("", "", "chat", "ru")
+
+
+def test_mid_sentence_starts_lowercase_after_a_space_and_drops_the_period():
+    assert fit_to_cursor("Давай созвонимся.", "Я думаю", " завтра", []) == " давай созвонимся"
+    assert fit_to_cursor("Давай созвонимся.", "Я думаю, ", "", []) == "давай созвонимся."
+    assert fit_to_cursor("Давай созвонимся.", "Готово.", "", []) == " Давай созвонимся."
+    assert fit_to_cursor("Давай созвонимся.", "Готово.\n", " Потом", []) == "Давай созвонимся."
+    assert fit_to_cursor("Давай созвонимся.", "Цитата: «", "», ок", []) == "давай созвонимся"
+    assert fit_to_cursor("Давай созвонимся...", "", " и всё", []) == "Давай созвонимся..."
+
+
+def test_cursor_keeps_abbreviations_names_and_english_i():
+    assert fit_to_cursor("API готов.", "Слушай,", "", []) == " API готов."
+    assert fit_to_cursor("GitHub упал.", "кстати", "", []) == " GitHub упал."
+    assert fit_to_cursor("Андрей придёт.", "кстати", "", ["Андрей"]) == " Андрей придёт."
+    assert fit_to_cursor("I'm in.", "ok,", "", []) == " I'm in."
+    assert fit_to_cursor("Привет.", "", "", []) == "Привет."
+
+
+def test_dictation_fits_the_cursor_but_a_command_does_not():
+    dictator = _dictator("Давай созвонимся.")
+    dictator.models = fake_models("ru")
+    dictator.models.asr_for = lambda language: FakeAsr("ну давай созвонимся")
+    assert dictator.dictate(np.zeros(16_000), before="Я думаю", after=" завтра").text == " давай созвонимся"
+    dictator.cfg.dictionary = ["Давай"]
+    assert dictator.dictate(np.zeros(16_000), before="Я думаю", after="").text == " Давай созвонимся."
+    command = dictator.dictate(np.zeros(16_000), before="Я думаю", after=" завтра", command=True)
+    assert command.text == "Давай созвонимся."
 
 
 def test_snippet_matches_spoken_variants():
