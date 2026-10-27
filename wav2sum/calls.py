@@ -126,7 +126,7 @@ def process(
         on_stage("Summarizing")
         started = time.monotonic()
         terms = list(dict.fromkeys([*dictionary, *vocabulary.words]))
-        summary = summarize(format_transcript(conversation, timestamps=False), llm, terms, language)
+        summary = summarize(format_transcript(conversation), llm, terms, language)
         timings["summarization"] = time.monotonic() - started
 
     duration = len(audio) / SAMPLE_RATE

@@ -1,5 +1,5 @@
 from wav2sum.llm import LLM
-from wav2sum.summarizer import chunk_transcript, summarize
+from wav2sum.summarizer import PROMPTS, chunk_transcript, summarize
 
 
 class FakeLLM(LLM):
@@ -60,3 +60,11 @@ def test_long_call_is_summarized_from_notes_on_its_parts():
 def test_an_utterance_longer_than_a_chunk_is_kept_whole():
     long = "Я: " + "слово " * 100
     assert chunk_transcript(f"Я: да\n\n{long}\n\nОн: нет", max_chars=50) == ["Я: да", long, "Он: нет"]
+
+
+def test_summary_ends_with_chapters_and_part_notes_keep_topic_timestamps():
+    ru, en = PROMPTS["ru"], PROMPTS["en"]
+    assert ru.summary.split("\n\nПравила:")[0].split("\n")[-1].startswith("**Главы** — не больше 8 глав")
+    assert en.summary.split("\n\nRules:")[0].split("\n")[-1].startswith("**Chapters** — at most 8 chapters")
+    assert "- смены темы: таймкод реплики, с которой началась тема" in ru.chunk
+    assert "- topic changes: the timestamp of the utterance where a topic begins" in en.chunk
