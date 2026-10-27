@@ -131,7 +131,23 @@ def test_no_chapters_without_a_valid_line_or_when_the_reply_runs_away():
 
 def test_a_long_call_gets_chapters_from_each_part():
     transcript = "\n\n".join(f"[{i:02d}:00 – {i:02d}:30] Я: " + "слово " * 30 for i in range(10))
-    llm = ChaptersLLM("- 00:00 — Начало", num_ctx=4096 + 100)
+    llm = ChaptersLLM("- 00:00 — Начало", num_ctx=4096 + 150)
     assert chapters(transcript, llm) == "**Главы**\n" + "\n".join(["- 00:00 — Начало"] * len(llm.calls))
-    assert len(llm.calls) > 1
+    assert 1 < len(llm.calls) <= 8
     assert "\n\n".join(user for _, user, _, _ in llm.calls) == transcript
+
+
+def test_more_than_8_chapters_are_merged_in_one_more_call():
+    transcript = "\n\n".join(f"[{i:02d}:00 – {i:02d}:30] Я: тема {i}" for i in range(12))
+
+    class Merging(ChaptersLLM):
+        def chat(self, system, user, examples=(), max_growth=None, think=None):
+            self.calls.append((system, user, max_growth, think))
+            if "Объедини" in system:
+                return "- 00:00 — Первая половина\n- 06:00 — Вторая половина"
+            return "\n".join(f"- {i:02d}:00 — Тема {i}" for i in range(12))
+
+    llm = Merging("")
+    assert chapters(transcript, llm) == "**Главы**\n- 00:00 — Первая половина\n- 06:00 — Вторая половина"
+    assert llm.calls[1][1] == "\n".join(f"- {i:02d}:00 — Тема {i}" for i in range(12))
+    assert llm.calls[1][3] is False

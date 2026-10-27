@@ -9,6 +9,7 @@ from wav2sum.llm import LLM
 logger = logging.getLogger(__name__)
 
 RESERVED_TOKENS = 4096
+MAX_CHAPTERS = 8
 
 ASR_NOTE_RU = """\
 Транскрипт получен автоматическим распознаванием речи и содержит ошибки: слова, похожие по звучанию, \
@@ -95,20 +96,32 @@ don't make anything up.\
 """
 
 
-CHAPTERS_PROMPT_RU = """\
+CHAPTERS_PROMPT_RU = f"""\
 Тебе дан транскрипт созвона с таймкодами реплик.
-Раздели разговор на главы по темам, по порядку, не больше 8. Новая глава начинается там, где разговор переходит \
-к другой теме.
+Раздели разговор на главы по темам, по порядку, не больше {MAX_CHAPTERS}. Первая глава начинается с первой реплики, \
+новая — там, где разговор переходит к другой теме.
 Ответ — только строки глав, каждая вида «- мм:сс — тема в нескольких словах», где мм:сс — таймкод начала первой \
 реплики главы, скопированный из транскрипта. Без вступления и пояснений.\
 """
 
-CHAPTERS_PROMPT_EN = """\
+CHAPTERS_PROMPT_EN = f"""\
 You are given a call transcript with timestamps on each utterance.
-Split the conversation into chapters by topic, in order, at most 8. A new chapter starts where the conversation \
-moves on to another topic.
+Split the conversation into chapters by topic, in order, at most {MAX_CHAPTERS}. The first chapter starts at the \
+first utterance, and a new one where the conversation moves on to another topic.
 Reply with chapter lines only, each as "- mm:ss — the topic in a few words", where mm:ss is the start timestamp of \
 the chapter's first utterance, copied from the transcript. No intro and no comments.\
+"""
+
+MERGE_CHAPTERS_PROMPT_RU = f"""\
+Тебе дан список глав созвона, по строке «- мм:сс — тема». Глав слишком много. Объедини соседние главы с близкими \
+темами так, чтобы осталось не больше {MAX_CHAPTERS}. У объединённой главы время её первой строки, тема — общая для \
+объединённых. Ответ — только строки глав в том же формате, без вступления и пояснений.\
+"""
+
+MERGE_CHAPTERS_PROMPT_EN = f"""\
+You are given a list of a call's chapters, one "- mm:ss — topic" line each. There are too many. Merge neighbouring \
+chapters with related topics so that at most {MAX_CHAPTERS} remain. A merged chapter takes the time of its first line \
+and a topic that covers the merged ones. Reply with chapter lines only, in the same format, no intro and no comments.\
 """
 
 
@@ -121,6 +134,7 @@ class Prompts:
     notes: str
     part: str
     chapters: str
+    merge_chapters: str
     chapters_title: str
 
 
@@ -133,6 +147,7 @@ PROMPTS = {
         "Заметки по частям созвона",
         "Часть",
         CHAPTERS_PROMPT_RU,
+        MERGE_CHAPTERS_PROMPT_RU,
         "Главы",
     ),
     EN: Prompts(
@@ -143,6 +158,7 @@ PROMPTS = {
         "Notes on parts of the call",
         "Part",
         CHAPTERS_PROMPT_EN,
+        MERGE_CHAPTERS_PROMPT_EN,
         "Chapters",
     ),
 }
@@ -168,11 +184,17 @@ def chapters(transcript: str, llm: LLM, language: str = RU) -> str:
     a chapters section in the summary prompt, the summary's thinking looped on re-checking them."""
     prompts = PROMPTS[language]
     starts = set(re.findall(r"^\[(\S+) – ", transcript, re.MULTILINE))
+
+    def at_starts(reply: str) -> list[str]:
+        return [line for line in reply.splitlines() if line.startswith("- ") and line[2:].split(" ")[0] in starts]
+
     lines = []
     try:
         for chunk in chunk_transcript(transcript, (llm.num_ctx - RESERVED_TOKENS) * 2 // 3, llm.count_tokens):
-            reply = llm.chat(prompts.chapters, chunk, max_growth=0.2, think=False)
-            lines += [line for line in reply.splitlines() if line.startswith("- ") and line[2:].split(" ")[0] in starts]
+            lines += at_starts(llm.chat(prompts.chapters, chunk, max_growth=0.2, think=False))
+        if len(lines) > MAX_CHAPTERS:
+            # The model doesn't keep to the limit, and a long call gets up to that many from each part.
+            lines = at_starts(llm.chat(prompts.merge_chapters, "\n".join(lines), max_growth=1, think=False)) or lines
     except ValueError as e:
         logger.warning("No chapters: %s", e)
         return ""
