@@ -89,10 +89,7 @@ def main():
         save_multifunction(descriptor, str(OUT))
     print(f"Saved {OUT}")
 
-    functions = {
-        n: ct.models.MLModel(str(OUT), function_name=f"s{s}", compute_units=ct.ComputeUnit.CPU_AND_NE)
-        for n, s in frames.items()
-    }
+    clips = []
     for path in sorted(load_config().recordings_dir.glob("*.wav"))[-RECORDINGS:]:
         audio = load_audio(path, channels=1)[:, 0]
         for seconds in CLIP_SECONDS:
@@ -101,13 +98,20 @@ def main():
             length = torch.tensor([clip.size(-1)])
             with torch.no_grad():
                 expected, expected_length = model.encoder(clip, length)
-            padded = pad(clip, list(frames))
-            out = functions[padded.size(-1)].predict(
-                {"features": padded.numpy(), "length": length.numpy().astype(np.int32)}
-            )
-            encoded = torch.from_numpy(out["encoded"][..., : int(expected_length)]).float()
-            cosine = torch.nn.functional.cosine_similarity(encoded.flatten(), expected.flatten(), dim=0)
-            print(f"{path.name} {seconds:>2} s: cosine {cosine:.4f}")
+            clips.append((path.name, seconds, pad(clip, list(frames)), length, expected, int(expected_length)))
+
+    # Core ML after all torch work: torch segfaults on the CPU after a Neural Engine predict in the same process.
+    functions = {
+        n: ct.models.MLModel(str(OUT), function_name=f"s{s}", compute_units=ct.ComputeUnit.CPU_AND_NE)
+        for n, s in frames.items()
+    }
+    for name, seconds, padded, length, expected, expected_length in clips:
+        out = functions[padded.size(-1)].predict(
+            {"features": padded.numpy(), "length": length.numpy().astype(np.int32)}
+        )
+        encoded = torch.from_numpy(out["encoded"][..., :expected_length]).float()
+        cosine = torch.nn.functional.cosine_similarity(encoded.flatten(), expected.flatten(), dim=0)
+        print(f"{name} {seconds:>2} s: cosine {cosine:.4f}")
 
 
 def _register_int_op():
