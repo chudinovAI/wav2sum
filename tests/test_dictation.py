@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from wav2sum.config import AUTO, DictationConfig
-from wav2sum.dictation import STYLES_EN, Dictator, expand_snippets, mark_snippets, style_for
+from wav2sum.dictation import MAX_GROWTH, STYLES_EN, Dictator, expand_snippets, mark_snippets, style_for
 from wav2sum.vocabulary import Vocabulary
 
 
@@ -28,13 +28,13 @@ def test_short_text_skips_llm_and_chat_drops_final_period():
     assert dictator.clean("Привет.", "email") == "Привет."
 
 
-def test_learned_words_fix_text_and_reach_the_prompt():
+def test_learned_words_fix_text_and_reach_the_prompt_only_as_pairs():
     vocabulary = Vocabulary()
     vocabulary.learn("Залей на гитхаб", "Залей на GitHub")
     dictator = Dictator(models=None, cfg=DictationConfig(dictionary=["GigaAM"]), vocabulary=vocabulary)
     assert dictator.clean("На гитхаб.", "chat") == "На GitHub"
     prompt = dictator._prompt("cleanup", "default")
-    assert "GigaAM, GitHub." in prompt
+    assert "именно так: GigaAM." in prompt
     assert "«гитхаб» → «GitHub»" in prompt
 
 
@@ -77,9 +77,11 @@ class ScriptedLLM:
     def __init__(self, reply):
         self.reply = reply
         self.requests = []
+        self.growths = []
 
-    def chat(self, system, user, examples=()):
+    def chat(self, system, user, examples=(), max_growth=None):
         self.requests.append((system, user))
+        self.growths.append(max_growth)
         if isinstance(self.reply, Exception):
             raise self.reply
         return self.reply(user) if callable(self.reply) else self.reply
@@ -105,6 +107,15 @@ def test_broken_or_runaway_cleanup_falls_back_to_raw_text():
     assert _dictator(TimeoutError("ollama is slow")).clean(raw, "default") == raw
     assert _dictator("").clean(raw, "default") == raw
     assert _dictator("Конечно! Вот письмо: " + "бла " * 50).clean(raw, "default") == raw
+
+
+def test_cleanup_and_translation_limit_the_reply_but_a_command_does_not():
+    dictator = _dictator("Текст")
+    dictator.clean("ну давай созвонимся в пятницу", "default")
+    dictator.translate("ну давай созвонимся в пятницу", "default")
+    dictator.models = fake_models("ru")
+    dictator.dictate(np.zeros(16_000), selection="Текст", command=True)
+    assert dictator.llm.growths == [MAX_GROWTH, MAX_GROWTH, None]
 
 
 def test_cleanup_off_inserts_raw_text():
@@ -165,7 +176,7 @@ def test_translation_keeps_snippets_and_learned_words():
     assert dictator.translate("напиши на мой имейл про гитхаб", "default") == "Write to me@example.com about GitHub."
     [(system, user)] = dictator.llm.requests
     assert user == "напиши на ⟦1⟧ про гитхаб"
-    assert "Leave markers like ⟦1⟧" in system and "GigaAM, GitHub." in system and "«гитхаб» → «GitHub»" in system
+    assert "Leave markers like ⟦1⟧" in system and "like this: GigaAM." in system and "«гитхаб» → «GitHub»" in system
 
 
 def test_translation_of_english_speech_is_plain_cleanup():

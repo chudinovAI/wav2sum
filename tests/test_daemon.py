@@ -111,6 +111,11 @@ def test_summary_model_stays_as_long_as_dictation_when_shared_else_a_minute():
     assert daemon.Daemon(cfg).summary_llm.keep_alive == 600
 
 
+def test_only_dictation_caches_its_prompt_prefix():
+    d = daemon.Daemon(Config())
+    assert (d.dictator.llm.cache_prefix, d.summary_llm.cache_prefix) == (True, False)
+
+
 @contextlib.asynccontextmanager
 async def _serving(d: daemon.Daemon, socket_path: Path):
     server = await asyncio.start_unix_server(d._serve, path=str(socket_path))
@@ -266,6 +271,32 @@ def test_jobs_run_after_models_load_and_report_failures(tmp_path, monkeypatch):
         good, broken = d.jobs
         assert (good.state, good.out_dir) == ("done", str(tmp_path / "output" / "good"))
         assert (broken.state, broken.error) == ("failed", "ffmpeg failed")
+        working.cancel()
+
+    asyncio.run(scenario())
+
+
+def test_pyannote_is_unloaded_once_the_queue_is_empty(tmp_path, monkeypatch):
+    unloaded = []
+
+    def fake_process(audio, *_, **__):
+        unloaded.append(audio.name)
+        if audio.name == "broken.wav":
+            raise RuntimeError("ffmpeg failed")
+        return type("Result", (), {"out_dir": tmp_path})()
+
+    monkeypatch.setattr(daemon, "process", fake_process)
+
+    async def scenario():
+        d = _daemon(tmp_path, monkeypatch, asyncio.Queue())
+        monkeypatch.setattr(d.models, "unload", unloaded.append)
+        for name in ("good.wav", "broken.wav"):
+            (tmp_path / name).write_bytes(b"")
+            d._enqueue(tmp_path / name)
+        d.ready.set()
+        working = asyncio.create_task(d._work())
+        await asyncio.sleep(0.2)
+        assert unloaded == ["good.wav", "broken.wav", "diarizer"]
         working.cancel()
 
     asyncio.run(scenario())

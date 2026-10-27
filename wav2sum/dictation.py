@@ -236,7 +236,9 @@ class Dictator:
         self.language = language
         # The user is waiting on the HUD: past this, the raw text goes out uncleaned.
         # Unloaded after 10 idle minutes; the first dictation after that pays ~1.5 s to reload.
-        self.llm = LLM(cfg.model, num_ctx=num_ctx, temperature=0.2, think=False, keep_alive=600, timeout=30)
+        self.llm = LLM(
+            cfg.model, num_ctx=num_ctx, temperature=0.2, think=False, keep_alive=600, timeout=30, cache_prefix=True
+        )
 
     def warm_up(self) -> None:
         self.models.preload([RU, EN] if self.language == AUTO else [self.language])
@@ -291,6 +293,7 @@ class Dictator:
                     self._prompt("cleanup", style, markers=bool(snippets), language=language),
                     marked,
                     PROMPTS[language].examples,
+                    MAX_GROWTH,
                 )
             except Exception as e:
                 logger.warning("Cleanup failed, inserting raw text: %s", e)
@@ -306,7 +309,9 @@ class Dictator:
         # Unlike clean(), a failed translation raises: Russian text pasted where English is expected is worse than none,
         # and the app beeps on the error.
         marked, snippets = mark_snippets(raw, self.cfg.snippets)
-        text = self.llm.chat(self._prompt("translate", style, markers=bool(snippets)), marked, TRANSLATE_EXAMPLES)
+        text = self.llm.chat(
+            self._prompt("translate", style, markers=bool(snippets)), marked, TRANSLATE_EXAMPLES, MAX_GROWTH
+        )
         if not text or len(text) > MAX_GROWTH * len(marked) + 40:
             raise ValueError(f"translation rejected ({len(marked)} → {len(text)} chars)")
         if style == "chat":
@@ -319,8 +324,10 @@ class Dictator:
         parts = [base, prompts.styles.get(style, "")]
         if markers:
             parts.append(prompts.markers)
-        if words := list(dict.fromkeys([*self.cfg.dictionary, *self.vocabulary.words])):
-            parts.append(prompts.words.format(", ".join(words)))
+        # Learned words go in only as "heard → written" pairs: a bare list makes the LLM swap in words that merely
+        # sound a bit alike ("ядра Кёрлы" → "ядра CoreML").
+        if self.cfg.dictionary:
+            parts.append(prompts.words.format(", ".join(self.cfg.dictionary)))
         if language == RU and (fixes := list(self.vocabulary.pairs.items())[-MAX_PROMPT_FIXES:]):
             parts.append(prompts.fixes.format(", ".join(f"«{heard}» → «{written}»" for heard, written in fixes)))
         return "\n\n".join(p for p in parts if p)
