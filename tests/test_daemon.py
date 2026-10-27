@@ -2,6 +2,7 @@ import asyncio
 import base64
 import contextlib
 import functools
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -169,7 +170,7 @@ def test_dictation_reaches_history_and_subscribers(tmp_path, monkeypatch, socket
             await asyncio.sleep(0.05)
 
             audio = np.linspace(-1, 1, 16_000, dtype=np.float32)
-            reply = await dictating.dictate(audio, app="ru.keepcoder.Telegram", command=False)
+            reply = await dictating.dictate(audio, app="ru.keepcoder.Telegram", command=False, before="Я думаю")
             assert (reply["text"], reply["seconds"], reply["app"]) == ("Привет", 1.0, "ru.keepcoder.Telegram")
 
             event = await asyncio.wait_for(next_event, timeout=5)
@@ -183,6 +184,8 @@ def test_dictation_reaches_history_and_subscribers(tmp_path, monkeypatch, socket
             "selection": None,
             "command": False,
             "translate": False,
+            "before": "Я думаю",
+            "after": None,
         }
         assert [entry["raw"] for entry in history] == ["привет"]
 
@@ -400,3 +403,30 @@ def test_streamed_dictation_matches_a_whole_one(tmp_path, monkeypatch, socket_pa
     del whole["time"], streamed["time"], whole["timings"], streamed["timings"]
     assert streamed == whole
     assert [entry["raw"] for entry in history] == ["0 1", "0 1"]
+
+
+def test_the_first_chunk_loads_an_unloaded_dictation_llm_once(tmp_path, monkeypatch):
+    async def scenario():
+        d = _daemon(tmp_path, monkeypatch, asyncio.Queue())
+        d.ready.set()
+        d.dictator.models = _loud_models()
+        warmed, loading = [], threading.Event()
+        monkeypatch.setattr(d.dictator, "warm_llm", lambda: warmed.append(loading.wait(1)))
+        chunk = {"cmd": "dictate_audio", "audio": _pcm(np.zeros(16_000, np.float32))}
+        await d._handle({**chunk, "first": True}, None)
+        await d._handle(chunk, None)
+        await d._handle({**chunk, "first": True}, None)  # the next dictation while the model still loads
+        loading.set()
+        await asyncio.sleep(0.1)
+        assert warmed == [True]
+
+        await d._handle({**chunk, "first": True}, None)  # unloaded again after the idle time
+        await asyncio.sleep(0.1)
+        assert warmed == [True, True]
+
+        monkeypatch.setattr(type(d.dictator.llm), "loaded", True)
+        await d._handle({**chunk, "first": True}, None)
+        await asyncio.sleep(0.1)
+        assert warmed == [True, True]
+
+    asyncio.run(scenario())

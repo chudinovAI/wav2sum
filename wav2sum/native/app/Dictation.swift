@@ -345,6 +345,20 @@ enum FocusedApp {
         return attribute(element, kAXValueAttribute) as? String
     }
 
+    /// A few characters on each side of the cursor (or of the selection that the dictation replaces), so the daemon can
+    /// fit the dictation into the sentence. Nil when the field does not expose its text.
+    static func textAroundCursor() -> (before: String, after: String)? {
+        guard let element = focusedElement, let value = text(of: element),
+              let range = attribute(element, kAXSelectedTextRangeAttribute) else { return nil }
+        var selected = CFRange()
+        guard AXValueGetValue(range as! AXValue, .cfRange, &selected), selected.location >= 0 else { return nil }
+        let field = value as NSString
+        let start = min(selected.location, field.length), end = min(start + selected.length, field.length)
+        let before = field.substring(with: NSRange(location: max(0, start - 20), length: min(20, start)))
+        let after = field.substring(with: NSRange(location: end, length: min(20, field.length - end)))
+        return (before, after)
+    }
+
     /// Electron apps (Claude, Slack, VS Code) expose their text fields to Accessibility only when asked to.
     static func exposeTextFields() {
         guard let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier else { return }
@@ -562,6 +576,11 @@ final class DictationController {
         // The daemon recognizes finished phrases while the user is still speaking.
         streamed = false
         streamTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.stream() }
+        // Read after the microphone starts: a slow field must not cut off the first word.
+        if !command, let around = FocusedApp.textAroundCursor() {
+            context["before"] = around.before
+            context["after"] = around.after
+        }
     }
 
     private func stream() {
