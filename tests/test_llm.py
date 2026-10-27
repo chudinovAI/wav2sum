@@ -43,6 +43,8 @@ class FakeModel:
     def __init__(self, name):
         self.name = name
         self.prefills = []
+        self.passes = 0
+        self.script = []  # prompt and reply tokens: the model predicts the token after each position
 
     def parameters(self):
         return {"w": SimpleNamespace(nbytes=3 * 2**20)}
@@ -50,7 +52,20 @@ class FakeModel:
     def __call__(self, batch, cache):
         [tokens] = batch
         self.prefills.append(list(tokens))
+        self.passes += 1
+        start = len(cache[0].tokens)
         cache[0].tokens += tokens
+        return [Logits(self.script[start + 1 : start + 1 + len(tokens)])]
+
+
+class Logits(list):
+    """Each position's logits, already decided: the sampler picks the token as is."""
+
+    def __sub__(self, _):
+        return self
+
+    def tolist(self):
+        return list(self)
 
     def encode(self, text):
         self.thread = threading.current_thread().name
@@ -144,9 +159,14 @@ def mlx(monkeypatch):
     models = ModuleType("mlx_lm.models")
     cache = ModuleType("mlx_lm.models.cache")
     cache.make_prompt_cache = lambda model: [FakeCache()]
+    cache.KVCache = FakeCache
+    cache.trim_prompt_cache = lambda layers, n: [
+        layer.tokens.__delitem__(slice(len(layer.tokens) - n, None)) for layer in layers
+    ]
     core = ModuleType("mlx.core")
     core.eval = core.clear_cache = lambda *_: None
     core.array = lambda x: x
+    core.logsumexp = lambda *_, **__: 0
     utils = ModuleType("mlx.utils")
     utils.tree_flatten = lambda tree: list(tree.items())
     mlx = ModuleType("mlx")
@@ -371,3 +391,75 @@ def test_a_template_that_renders_the_prefix_differently_runs_the_whole_prompt(ml
     LLM("gemma", cache_prefix=True).chat("чисти", "раз", EXAMPLES)
     assert mlx.models[0].prefills == []
     assert (len(mlx.calls[0]["prompt"]), mlx.calls[0]["cache"]) == (5, None)
+
+
+class WordTokenizer(FakeTokenizer):
+    """A token per word, so a reply can copy the input."""
+
+    has_thinking = False
+    eos_token_ids = frozenset({"<eos>"})
+
+    def apply_chat_template(self, messages, add_generation_prompt, enable_thinking):
+        words = [w for m in messages for w in [f"<{m['role']}>", *m["content"].split()]]
+        return [*words, "<reply>"] if add_generation_prompt else words
+
+    def decode(self, tokens):
+        return " ".join(tokens)
+
+
+@pytest.fixture
+def lookup(mlx, monkeypatch):
+    """The model answers `reply` to the cleanup of `ну раз два три четыре пять шесть семь`."""
+    monkeypatch.setattr(sys.modules["mlx_lm.sample_utils"], "make_sampler", lambda temp: lambda logits: logits)
+
+    def load(name):
+        model, _ = FakeMLX.load(mlx, name)
+        return model, WordTokenizer()
+
+    mlx.load = load
+    sys.modules["mlx_lm"].load = load
+
+    def answer(reply):
+        llm = LLM("gemma", cache_prefix=True)
+        llm.chat("чисти", "ну", EXAMPLES)  # loads the model and caches the prefix
+        model, tokenizer = llm_module._loaded["gemma"]
+        prompt = tokenizer.apply_chat_template(
+            [
+                {"role": "system", "content": "чисти"},
+                {"role": "user", "content": "ну э привет"},
+                {"role": "assistant", "content": "Привет."},
+                {"role": "user", "content": RAW},
+            ],
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
+        model.script = [*prompt, *reply.split(), "<eos>"]
+        model.passes = 0
+        return llm.chat("чисти", RAW, EXAMPLES, max_growth=1.5, lookup=True), model
+
+    return answer
+
+
+RAW = "ну раз два три четыре пять шесть семь"
+
+
+def test_lookup_copies_the_input_several_tokens_a_pass(lookup):
+    text, model = lookup("раз два три четыре пять шесть семь")
+    assert text == "раз два три четыре пять шесть семь"
+    assert model.passes - 1 < 8 / 2  # the first pass is the prefill of the dictation's own message
+
+
+def test_lookup_throws_out_a_wrong_draft_and_keeps_the_model_reply(lookup):
+    text, _ = lookup("раз два, три пять шесть семь восемь")
+    assert text == "раз два, три пять шесть семь восемь"
+
+
+def test_lookup_leaves_the_saved_prefix_clean(lookup):
+    lookup("раз два три четыре")
+    [prefix] = llm_module._prefixes["gemma"].values()
+    assert prefix[0].tokens == ["<system>", "чисти", "<user>", "ну", "э", "привет", "<assistant>", "Привет."]
+
+
+def test_lookup_stops_a_runaway_at_the_limit(lookup):
+    with pytest.raises(ValueError):
+        lookup(" ".join(["бла"] * 100))
