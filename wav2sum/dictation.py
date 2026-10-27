@@ -238,13 +238,17 @@ class Dictator:
         self.vocabulary = vocabulary or Vocabulary()
         self.language = language
         # The user is waiting on the HUD: past this, the raw text goes out uncleaned.
-        # Unloaded after 10 idle minutes; the first dictation after that pays ~1.5 s to reload.
+        # Unloaded after 10 idle minutes; the daemon reloads it on the first audio chunk of the next dictation.
         self.llm = LLM(
             cfg.model, num_ctx=num_ctx, temperature=0.2, think=False, keep_alive=600, timeout=30, cache_prefix=True
         )
 
     def warm_up(self) -> None:
         self.models.preload([RU, EN] if self.language == AUTO else [self.language])
+        self.warm_llm()
+
+    def warm_llm(self) -> None:
+        """Loads the weights and the prefix cache of the default cleanup prompt."""
         if self.cfg.cleanup:
             try:
                 self.llm.chat(self._prompt("cleanup", "default"), "ну привет как дела", CLEANUP_EXAMPLES_RU)

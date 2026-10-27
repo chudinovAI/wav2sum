@@ -264,6 +264,15 @@ def test_a_chat_resets_the_idle_timer(mlx):
     assert mlx.loads == ["gemma"]
 
 
+def test_loaded_tells_whether_the_weights_are_in_memory(mlx):
+    llm = LLM("gemma", keep_alive=600)
+    assert not llm.loaded
+    llm.chat("s", "u")
+    assert llm.loaded
+    _idle_timeout_passes()
+    assert not llm.loaded
+
+
 def test_unload_frees_the_weights(mlx):
     llm = LLM("gemma")
     llm.chat("s", "u")
