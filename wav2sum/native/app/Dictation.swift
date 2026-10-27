@@ -80,10 +80,14 @@ final class Microphone {
     private let target = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 1, interleaved: false)!
     private var converter: AVAudioConverter?
     private var samples: [Float] = []
+    private var taken = 0
     private let lock = NSLock()
 
     func start() throws {
-        lock.withLock { samples.removeAll(keepingCapacity: true) }
+        lock.withLock {
+            samples.removeAll(keepingCapacity: true)
+            taken = 0
+        }
         // A long-lived engine keeps the input format it first saw; once the mic's sample rate
         // changes, installTap raises an Objective-C exception that `try` can't catch.
         engine = AVAudioEngine()
@@ -104,6 +108,14 @@ final class Microphone {
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
         return lock.withLock { samples }
+    }
+
+    /// The samples recorded since the last call.
+    func take() -> [Float] {
+        lock.withLock {
+            defer { taken = samples.count }
+            return Array(samples[taken...])
+        }
     }
 
     private func consume(_ buffer: AVAudioPCMBuffer) {
@@ -481,6 +493,8 @@ final class DictationController {
     private var context: JSON = [:]
     private var command = false
     private var translate = false
+    private var streamTimer: Timer?
+    private var streamed = false
 
     private let tapWindow = 0.3
     private let doubleTapWindow = 0.4
@@ -545,9 +559,20 @@ final class DictationController {
         phase = handsFree ? .handsFree : .recording
         hud.show(.listening(command: command, translate: translate))
         onBusyChange?(true)
+        // The daemon recognizes finished phrases while the user is still speaking.
+        streamed = false
+        streamTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.stream() }
+    }
+
+    private func stream() {
+        let chunk = mic.take()
+        guard !chunk.isEmpty else { return }
+        daemon.request("dictate_audio", ["audio": Self.encode(chunk), "first": !streamed])
+        streamed = true
     }
 
     private func cancel() {
+        streamTimer?.invalidate()
         _ = mic.stop()
         phase = .idle
         hud.hide()
@@ -555,6 +580,7 @@ final class DictationController {
     }
 
     private func finish() {
+        streamTimer?.invalidate()
         let samples = mic.stop()
         guard samples.count > 16_000 / 4 else {
             Log.write("too short: \(samples.count) samples")
@@ -566,7 +592,8 @@ final class DictationController {
         hud.show(.thinking)
 
         var request = context
-        request["audio"] = Self.encode(samples)
+        request["audio"] = Self.encode(mic.take())
+        request["streamed"] = streamed
         daemon.request("dictate", request) { [weak self] reply in
             guard let self else { return }
             self.phase = .idle
