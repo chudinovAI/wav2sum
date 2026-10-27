@@ -20,6 +20,7 @@ class FakeTokenizer:
         return [*tokens, ("reply", enable_thinking)] if add_generation_prompt else tokens
 
     def encode(self, text):
+        self.thread = threading.current_thread().name
         return text.split()
 
 
@@ -49,6 +50,10 @@ class FakeModel:
         [tokens] = batch
         self.prefills.append(list(tokens))
         cache[0].tokens += tokens
+
+    def encode(self, text):
+        self.thread = threading.current_thread().name
+        return text.split()
 
 
 class FakeMLX:
@@ -165,6 +170,14 @@ def test_reply_is_limited_by_the_input_length_and_a_runaway_raises(mlx):
     with pytest.raises(ValueError):
         llm.chat("s", "раз два три четыре", max_growth=1.5)
     assert [call["max_tokens"] for call in mlx.calls] == [70, 70]
+
+
+def test_tokens_are_counted_by_the_model_tokenizer_in_the_llm_thread(mlx):
+    llm = LLM("gemma")
+    assert llm.count_tokens("раз два три") == 3
+    llm.chat("s", "u")
+    assert mlx.loads == ["gemma"]
+    assert llm_module._loaded["gemma"][1].thread.startswith("llm")
 
 
 def test_think_turns_on_thinking(mlx):
