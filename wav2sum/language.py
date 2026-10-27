@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import threading
 import warnings
 
@@ -18,6 +19,15 @@ LABELS = {RU: "ru: Russian", EN: "en: English"}
 
 MAX_SPANS = 8
 MAX_CLIP_SEC = 10.0
+
+# GigaAM writes English speech in Latin letters (85–100 % on the evalset) and Russian in Cyrillic, where English
+# terms make at most 40 % of the letters.
+MAX_LATIN_IN_RU = 0.6
+
+
+def text_language(text: str) -> str:
+    letters = re.findall(r"[^\W\d_]", text)
+    return EN if letters and sum(c.isascii() for c in letters) / len(letters) > MAX_LATIN_IN_RU else RU
 
 
 class LanguageDetector:

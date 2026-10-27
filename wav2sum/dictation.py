@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from wav2sum.config import AUTO, DictationConfig
-from wav2sum.language import EN, RU
+from wav2sum.language import EN, RU, text_language
 from wav2sum.llm import LLM
 from wav2sum.models import Models
 from wav2sum.vad import MERGE_GAP_SEC
@@ -371,7 +371,7 @@ class DictationStream:
         spans = self.models.vad.speech_spans(audio)
         done = [span for span, after in itertools.pairwise(spans) if after[0] - span[1] >= MERGE_GAP_SEC]
         if self.language is None and sum(end - start for start, end in done) >= LANGUAGE_SPEECH_SEC:
-            self.language = self.models.lid.detect(audio, done)
+            self._detect(audio, done)
         if self.language:
             self._transcribe(audio, done)
         self.live += time.monotonic() - started
@@ -382,9 +382,18 @@ class DictationStream:
         if not spans:
             return "", self.language or RU
         if self.language is None:
-            self.language = self.models.lid.detect(audio, spans)
+            self._detect(audio, spans)
         self._transcribe(audio, spans)
         return " ".join(self.texts[span] for span in spans if self.texts[span]), self.language
+
+    def _detect(self, audio: np.ndarray, spans: list[tuple[float, float]]) -> None:
+        # VoxLingua hears Russian in English spoken with a Russian accent, but GigaAM writes that English in Latin
+        # letters: recognize with GigaAM, and only a Latin text goes again to Parakeet.
+        self.language = RU
+        self._transcribe(audio, spans)
+        if text_language(" ".join(self.texts[span] for span in spans)) == EN:
+            self.language = EN
+            self.texts.clear()
 
     def _transcribe(self, audio: np.ndarray, spans: list[tuple[float, float]]) -> None:
         if new := [span for span in spans if span not in self.texts]:

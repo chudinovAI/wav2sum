@@ -14,6 +14,7 @@ from wav2sum.dictation import (
     mark_snippets,
     style_for,
 )
+from wav2sum.language import text_language
 from wav2sum.vad import merge_close_spans
 from wav2sum.vocabulary import Vocabulary
 
@@ -57,12 +58,9 @@ class FakeAsr:
 
 
 def fake_models(language):
-    asr = {"ru": FakeAsr("привет"), "en": FakeAsr("hello")}
-    return SimpleNamespace(
-        vad=SimpleNamespace(speech_spans=lambda audio: [(0.0, 1.0)]),
-        lid=SimpleNamespace(detect=lambda audio, spans: language),
-        asr_for=asr.__getitem__,
-    )
+    # GigaAM writes English speech in Latin letters.
+    asr = {"ru": FakeAsr("привет" if language == "ru" else "Hallo"), "en": FakeAsr("hello")}
+    return SimpleNamespace(vad=SimpleNamespace(speech_spans=lambda audio: [(0.0, 1.0)]), asr_for=asr.__getitem__)
 
 
 def test_detected_language_picks_the_recognizer_and_prompts():
@@ -73,7 +71,6 @@ def test_detected_language_picks_the_recognizer_and_prompts():
 
 def test_fixed_language_skips_detection():
     models = fake_models("ru")
-    models.lid = None
     assert Dictator(models, DictationConfig(), language="en").recognize(np.zeros(16_000)) == ("hello", "en")
 
 
@@ -151,7 +148,7 @@ def test_voice_command_rewrites_the_selection():
     assert (dictation.text, dictation.command, dictation.language) == ("Short text", True, "ru")
     [(system, user)] = dictator.llm.requests
     assert system.startswith("Ты — помощник по работе с текстом")
-    assert user == "Текст:\nA very long text\n\nКоманда: привет"
+    assert user == "Текст:\nA very long text\n\nКоманда: Hallo"
 
 
 def test_silence_gives_empty_text_without_llm():
@@ -265,9 +262,7 @@ def loud_models():
         return merge_close_spans(spans, 0.6, 20.0)
 
     asr = SpanAsr()
-    lid = SimpleNamespace(calls=[])
-    lid.detect = lambda audio, spans: lid.calls.append(spans) or "ru"
-    return SimpleNamespace(vad=SimpleNamespace(speech_spans=speech_spans), lid=lid, asr_for=lambda _: asr, asr=asr)
+    return SimpleNamespace(vad=SimpleNamespace(speech_spans=speech_spans), asr_for=lambda _: asr, asr=asr)
 
 
 def _speech(*parts):
@@ -312,12 +307,12 @@ def test_auto_language_waits_for_three_seconds_of_finished_speech(models):
     stream = DictationStream(Dictator(models, DictationConfig(), language=AUTO))
     stream.add(audio[: 4 * 16_000])
     stream.step()
-    assert (models.lid.calls, models.asr.calls) == ([], [])
+    assert models.asr.calls == []
     stream.add(audio[4 * 16_000 :])
     stream.step()
-    assert (models.lid.calls, models.asr.calls) == ([[(0.0, 2.0), (3.0, 5.0)]], [[(0.0, 2.0), (3.0, 5.0)]])
+    assert models.asr.calls == [[(0.0, 2.0), (3.0, 5.0)]]
     assert stream.finish() == ("0 3 6", "ru")
-    assert len(models.lid.calls) == 1
+    assert models.asr.calls == [[(0.0, 2.0), (3.0, 5.0)], [(6.0, 7.0)]]
 
 
 def test_short_auto_dictation_detects_the_language_at_the_end(models):
@@ -325,7 +320,35 @@ def test_short_auto_dictation_detects_the_language_at_the_end(models):
     stream.add(_speech(1, 1, 1))
     stream.step()
     assert stream.finish() == ("0 2", "ru")
-    assert models.lid.calls == [[(0.0, 1.0), (2.0, 3.0)]]
+    assert models.asr.calls == [[(0.0, 1.0), (2.0, 3.0)]]
+
+
+def test_latin_text_from_gigaam_sends_the_dictation_to_parakeet(models):
+    gigaam, parakeet = SpanAsr(), SpanAsr()
+    gigaam.transcribe_spans = lambda audio, spans: gigaam.calls.append(spans) or ["Sence for the fitback"] * len(spans)
+    models.asr_for = {"ru": gigaam, "en": parakeet}.__getitem__
+    audio = _speech(2, 1, 2, 1, 1)
+    stream = DictationStream(Dictator(models, DictationConfig(), language=AUTO))
+    stream.add(audio)
+    stream.step()
+    assert stream.finish() == ("0 3 6", "en")
+    assert gigaam.calls == [[(0.0, 2.0), (3.0, 5.0)]]
+    assert parakeet.calls == [[(0.0, 2.0), (3.0, 5.0)], [(6.0, 7.0)]]
+
+
+@pytest.mark.parametrize(
+    ("text", "language"),
+    [
+        ("Thanks for the feedback, I will update the docs.", "en"),
+        ("Шар The Figh Malink & Swag", "en"),
+        ("Проверь, что Python Script работает на Макос.", "ru"),
+        ("Фронтентный реактор Bacan Fostape.", "ru"),
+        ("", "ru"),
+        ("123", "ru"),
+    ],
+)
+def test_text_language_by_the_share_of_latin_letters(text, language):
+    assert text_language(text) == language
 
 
 def test_streamed_dictation_reports_live_and_final_asr(models):
