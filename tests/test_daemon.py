@@ -111,6 +111,11 @@ def test_summary_model_stays_as_long_as_dictation_when_shared_else_a_minute():
     assert daemon.Daemon(cfg).summary_llm.keep_alive == 600
 
 
+def test_only_dictation_caches_its_prompt_prefix():
+    d = daemon.Daemon(Config())
+    assert (d.dictator.llm.cache_prefix, d.summary_llm.cache_prefix) == (True, False)
+
+
 @contextlib.asynccontextmanager
 async def _serving(d: daemon.Daemon, socket_path: Path):
     server = await asyncio.start_unix_server(d._serve, path=str(socket_path))

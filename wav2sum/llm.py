@@ -1,3 +1,4 @@
+import copy
 import gc
 import logging
 import threading
@@ -10,6 +11,10 @@ logger = logging.getLogger(__name__)
 _worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="llm")
 _loaded: dict[str, tuple] = {}
 _timers: dict[str, threading.Timer] = {}
+# Dictation reruns the same system prompt and examples each time; their KV cache saves that prefill.
+# One prefix per app style in use (chat, code, email, a command); least recently used goes first.
+MAX_PREFIXES = 4
+_prefixes: dict[str, dict[tuple, list]] = {}
 
 
 @dataclass
@@ -20,6 +25,7 @@ class LLM:
     think: bool | None = None
     keep_alive: float | None = None  # idle seconds before the weights are freed; None keeps them until unload()
     timeout: float | None = None
+    cache_prefix: bool = False  # keep the KV cache of all but the last message while the weights are loaded
 
     def chat(
         self, system: str, user: str, examples: list[tuple[str, str]] = (), max_growth: float | None = None
@@ -56,7 +62,25 @@ class LLM:
         limit = self.num_ctx
         if max_growth is not None:
             limit = min(limit, int(max_growth * len(tokenizer.encode(messages[-1]["content"]))) + 64)
-        text = generate(model, tokenizer, prompt, max_tokens=limit, sampler=make_sampler(self.temperature))
+        cache = None
+        if self.cache_prefix:
+            prefix = tokenizer.apply_chat_template(
+                messages[:-1], add_generation_prompt=False, enable_thinking=bool(self.think)
+            )
+            if prompt[: len(prefix)] == prefix:
+                # Generation writes into the cache, so it gets a copy and the saved prefix stays clean.
+                cache = copy.deepcopy(_prefix_cache(self.model, model, tuple(prefix)))
+                prompt = prompt[len(prefix) :]
+            else:
+                logger.debug("The chat template renders the prefix differently; running the whole prompt")
+        text = generate(
+            model,
+            tokenizer,
+            prompt,
+            max_tokens=limit,
+            sampler=make_sampler(self.temperature),
+            prompt_cache=cache,
+        )
         if self.keep_alive is not None:
             _timers[self.model] = timer = threading.Timer(self.keep_alive, lambda: _worker.submit(_unload, self.model))
             timer.daemon = True
@@ -74,10 +98,12 @@ def _log_failure(future) -> None:
 
 
 def memory_mb() -> int:
-    """Memory held by the loaded LLM weights."""
+    """Memory held by the loaded LLM weights and their prompt prefix caches."""
     from mlx.utils import tree_flatten
 
-    return sum(v.nbytes for model, _ in list(_loaded.values()) for _, v in tree_flatten(model.parameters())) // 2**20
+    weights = sum(v.nbytes for model, _ in list(_loaded.values()) for _, v in tree_flatten(model.parameters()))
+    caches = sum(layer.nbytes for c in list(_prefixes.values()) for cache in list(c.values()) for layer in cache)
+    return (weights + caches) // 2**20
 
 
 def _load(name: str) -> tuple:
@@ -92,9 +118,27 @@ def _load(name: str) -> tuple:
     return _loaded[name]
 
 
+def _prefix_cache(name: str, model, prefix: tuple) -> list:
+    caches = _prefixes.setdefault(name, {})
+    if prefix in caches:
+        caches[prefix] = caches.pop(prefix)  # the most recently used goes last
+    else:
+        import mlx.core as mx
+        from mlx_lm.models.cache import make_prompt_cache
+
+        cache = make_prompt_cache(model)
+        model(mx.array([prefix]), cache=cache)
+        mx.eval([layer.state for layer in cache])
+        caches[prefix] = cache
+        if len(caches) > MAX_PREFIXES:
+            del caches[next(iter(caches))]
+    return caches[prefix]
+
+
 def _unload(name: str) -> None:
     if timer := _timers.pop(name, None):
         timer.cancel()
+    _prefixes.pop(name, None)
     if _loaded.pop(name, None):
         import mlx.core as mx
 
