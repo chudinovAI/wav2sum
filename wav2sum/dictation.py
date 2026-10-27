@@ -291,6 +291,7 @@ class Dictator:
                     self._prompt("cleanup", style, markers=bool(snippets), language=language),
                     marked,
                     PROMPTS[language].examples,
+                    MAX_GROWTH,
                 )
             except Exception as e:
                 logger.warning("Cleanup failed, inserting raw text: %s", e)
@@ -306,7 +307,9 @@ class Dictator:
         # Unlike clean(), a failed translation raises: Russian text pasted where English is expected is worse than none,
         # and the app beeps on the error.
         marked, snippets = mark_snippets(raw, self.cfg.snippets)
-        text = self.llm.chat(self._prompt("translate", style, markers=bool(snippets)), marked, TRANSLATE_EXAMPLES)
+        text = self.llm.chat(
+            self._prompt("translate", style, markers=bool(snippets)), marked, TRANSLATE_EXAMPLES, MAX_GROWTH
+        )
         if not text or len(text) > MAX_GROWTH * len(marked) + 40:
             raise ValueError(f"translation rejected ({len(marked)} → {len(text)} chars)")
         if style == "chat":

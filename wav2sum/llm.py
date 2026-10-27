@@ -21,7 +21,10 @@ class LLM:
     keep_alive: float | None = None  # idle seconds before the weights are freed; None keeps them until unload()
     timeout: float | None = None
 
-    def chat(self, system: str, user: str, examples: list[tuple[str, str]] = ()) -> str:
+    def chat(
+        self, system: str, user: str, examples: list[tuple[str, str]] = (), max_growth: float | None = None
+    ) -> str:
+        """max_growth caps the reply at that many times the input's tokens, so a looping model stops early."""
         logger.debug("→ %s: %d chars", self.model, len(user))
         shots = [
             {"role": role, "content": text}
@@ -29,7 +32,7 @@ class LLM:
             for role, text in zip(("user", "assistant"), pair, strict=True)
         ]
         messages = [{"role": "system", "content": system}, *shots, {"role": "user", "content": user}]
-        future = _worker.submit(self._generate, messages)
+        future = _worker.submit(self._generate, messages, max_growth)
         try:
             return future.result(self.timeout)
         except TimeoutError:
@@ -42,7 +45,7 @@ class LLM:
     def unload(self) -> None:
         _worker.submit(_unload, self.model).result()
 
-    def _generate(self, messages: list[dict]) -> str:
+    def _generate(self, messages: list[dict], max_growth: float | None) -> str:
         from mlx_lm import generate
         from mlx_lm.sample_utils import make_sampler
 
@@ -50,11 +53,16 @@ class LLM:
             timer.cancel()
         model, tokenizer = _load(self.model)
         prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=True, enable_thinking=bool(self.think))
-        text = generate(model, tokenizer, prompt, max_tokens=self.num_ctx, sampler=make_sampler(self.temperature))
+        limit = self.num_ctx
+        if max_growth is not None:
+            limit = min(limit, int(max_growth * len(tokenizer.encode(messages[-1]["content"]))) + 64)
+        text = generate(model, tokenizer, prompt, max_tokens=limit, sampler=make_sampler(self.temperature))
         if self.keep_alive is not None:
             _timers[self.model] = timer = threading.Timer(self.keep_alive, lambda: _worker.submit(_unload, self.model))
             timer.daemon = True
             timer.start()
+        if max_growth is not None and len(tokenizer.encode(text)) >= limit:
+            raise ValueError(f"LLM reply hit the {limit}-token limit")
         if tokenizer.has_thinking:
             text = text.rpartition(tokenizer.think_end)[2]
         return text.strip()
