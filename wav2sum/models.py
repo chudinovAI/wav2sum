@@ -1,3 +1,4 @@
+import gc
 import threading
 
 import numpy as np
@@ -55,6 +56,13 @@ class Models:
         if len(languages) > 1:
             self.lid.detect(silence)
         self.vad.speech_spans(silence)
+
+    def unload(self, name: str) -> None:
+        with self.lock:
+            self._loaded.pop(name, None)
+            gc.collect()
+            if self.device == "mps":
+                torch.mps.empty_cache()
 
     def _load(self, name, factory):
         with self.lock:
