@@ -10,21 +10,33 @@ class Subsampling(torch.nn.Module):
 
 
 class Positions(torch.nn.Module):
-    def forward(self, x):
-        return x, torch.arange(x.size(1)).float()
+    def extend_pe(self, length, device):
+        self.pe = torch.arange(2 * length, dtype=torch.float32, device=device)
+
+
+class Attention(torch.nn.Module):
+    torch_sdpa_attn = True
 
 
 class Layer(torch.nn.Module):
     """Attention that leaks padding unless `att_mask` hides it, as in GigaAM's Conformer layers."""
 
+    def __init__(self):
+        super().__init__()
+        self.self_attn = Attention()
+
     def forward(self, x, pos_emb, att_mask, pad_mask):
+        cos, sin = pos_emb
         scores = x @ x.transpose(1, 2)
         if att_mask is not None:
             scores = scores.masked_fill(att_mask, -1e4)
-        return (scores.softmax(-1) @ x + pos_emb[None, :, None]).masked_fill(pad_mask.unsqueeze(-1), 0.0)
+        x = scores.softmax(-1) @ x + cos[None, :, None] - sin[None, :, None]
+        return x.masked_fill(pad_mask.unsqueeze(-1), 0.0)
 
 
 class Encoder(torch.nn.Module):
+    pos_emb_max_len = 50
+
     def __init__(self):
         super().__init__()
         self.pre_encode = Subsampling()
@@ -42,6 +54,12 @@ def test_padding_to_a_fixed_shape_does_not_change_the_frames_of_the_clip():
     assert padded.shape == (1, 4, 10)
     assert length.tolist() == padded_length.tolist() == [6]
     torch.testing.assert_close(padded[..., :6], encoded)
+
+
+def test_attention_skips_sdpa_which_leaks_padding_on_the_neural_engine():
+    encoder = coreml.MaskedEncoder(Encoder())
+
+    assert [layer.self_attn.torch_sdpa_attn for layer in encoder.encoder.layers] == [False, False]
 
 
 def test_pad_takes_the_smallest_shape_that_fits_and_fills_with_zeros():
