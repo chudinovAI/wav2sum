@@ -1,5 +1,5 @@
 import logging
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from wav2sum.language import EN, RU
@@ -7,7 +7,6 @@ from wav2sum.llm import LLM
 
 logger = logging.getLogger(__name__)
 
-CHARS_PER_TOKEN = 3.5
 RESERVED_TOKENS = 4096
 
 ASR_NOTE_RU = """\
@@ -134,24 +133,26 @@ PROMPTS = {
 def summarize(transcript: str, llm: LLM, terms: Sequence[str] = (), language: str = RU) -> str:
     prompts = PROMPTS[language]
     glossary = "\n\n" + prompts.glossary.format(", ".join(terms)) if terms else ""
-    max_chars = int((llm.num_ctx - RESERVED_TOKENS) * CHARS_PER_TOKEN)
-    if len(transcript) <= max_chars:
-        return llm.chat(prompts.summary + glossary, f"{prompts.transcript}:\n\n{transcript}")
+    max_tokens = llm.num_ctx - RESERVED_TOKENS
+    user = f"{prompts.transcript}:\n\n{transcript}"
+    if llm.count_tokens(prompts.summary + glossary + user) <= max_tokens:
+        return llm.chat(prompts.summary + glossary, user)
 
-    chunks = chunk_transcript(transcript, max_chars * 2 // 3)
+    chunks = chunk_transcript(transcript, max_tokens * 2 // 3, llm.count_tokens)
     logger.info("Long transcript (%d chars): summarizing %d parts first.", len(transcript), len(chunks))
     notes = [llm.chat(prompts.chunk + glossary, chunk) for chunk in chunks]
     joined = "\n\n".join(f"--- {prompts.part} {i} ---\n{n}" for i, n in enumerate(notes, 1))
     return llm.chat(prompts.summary + glossary, f"{prompts.notes}:\n\n{joined}")
 
 
-def chunk_transcript(transcript: str, max_chars: int) -> list[str]:
+def chunk_transcript(transcript: str, max_tokens: int, count_tokens: Callable[[str], int]) -> list[str]:
     chunks: list[list[str]] = [[]]
     size = 0
     for utterance in transcript.split("\n\n"):
-        if chunks[-1] and size + len(utterance) > max_chars:
+        tokens = count_tokens(utterance)
+        if chunks[-1] and size + tokens > max_tokens:
             chunks.append([])
             size = 0
         chunks[-1].append(utterance)
-        size += len(utterance) + 2
+        size += tokens
     return ["\n\n".join(c) for c in chunks]

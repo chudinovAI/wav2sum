@@ -4,7 +4,16 @@ import numpy as np
 import pytest
 
 from wav2sum.config import AUTO, DictationConfig
-from wav2sum.dictation import STYLES_EN, Dictator, expand_snippets, mark_snippets, style_for
+from wav2sum.dictation import (
+    MAX_GROWTH,
+    STYLES_EN,
+    DictationStream,
+    Dictator,
+    expand_snippets,
+    mark_snippets,
+    style_for,
+)
+from wav2sum.vad import merge_close_spans
 from wav2sum.vocabulary import Vocabulary
 
 
@@ -28,13 +37,13 @@ def test_short_text_skips_llm_and_chat_drops_final_period():
     assert dictator.clean("Привет.", "email") == "Привет."
 
 
-def test_learned_words_fix_text_and_reach_the_prompt():
+def test_learned_words_fix_text_and_reach_the_prompt_only_as_pairs():
     vocabulary = Vocabulary()
     vocabulary.learn("Залей на гитхаб", "Залей на GitHub")
     dictator = Dictator(models=None, cfg=DictationConfig(dictionary=["GigaAM"]), vocabulary=vocabulary)
     assert dictator.clean("На гитхаб.", "chat") == "На GitHub"
     prompt = dictator._prompt("cleanup", "default")
-    assert "GigaAM, GitHub." in prompt
+    assert "именно так: GigaAM." in prompt
     assert "«гитхаб» → «GitHub»" in prompt
 
 
@@ -77,9 +86,13 @@ class ScriptedLLM:
     def __init__(self, reply):
         self.reply = reply
         self.requests = []
+        self.growths = []
+        self.lookups = []
 
-    def chat(self, system, user, examples=()):
+    def chat(self, system, user, examples=(), max_growth=None, lookup=False):
         self.requests.append((system, user))
+        self.growths.append(max_growth)
+        self.lookups.append(lookup)
         if isinstance(self.reply, Exception):
             raise self.reply
         return self.reply(user) if callable(self.reply) else self.reply
@@ -105,6 +118,24 @@ def test_broken_or_runaway_cleanup_falls_back_to_raw_text():
     assert _dictator(TimeoutError("ollama is slow")).clean(raw, "default") == raw
     assert _dictator("").clean(raw, "default") == raw
     assert _dictator("Конечно! Вот письмо: " + "бла " * 50).clean(raw, "default") == raw
+
+
+def test_cleanup_and_translation_limit_the_reply_but_a_command_does_not():
+    dictator = _dictator("Текст")
+    dictator.clean("ну давай созвонимся в пятницу", "default")
+    dictator.translate("ну давай созвонимся в пятницу", "default")
+    dictator.models = fake_models("ru")
+    dictator.dictate(np.zeros(16_000), selection="Текст", command=True)
+    assert dictator.llm.growths == [MAX_GROWTH, MAX_GROWTH, None]
+
+
+def test_only_cleanup_drafts_its_reply_from_the_input():
+    dictator = _dictator("Текст")
+    dictator.clean("ну давай созвонимся в пятницу", "default")
+    dictator.translate("ну давай созвонимся в пятницу", "default")
+    dictator.models = fake_models("ru")
+    dictator.dictate(np.zeros(16_000), selection="Текст", command=True)
+    assert dictator.llm.lookups == [True, False, False]
 
 
 def test_cleanup_off_inserts_raw_text():
@@ -165,7 +196,7 @@ def test_translation_keeps_snippets_and_learned_words():
     assert dictator.translate("напиши на мой имейл про гитхаб", "default") == "Write to me@example.com about GitHub."
     [(system, user)] = dictator.llm.requests
     assert user == "напиши на ⟦1⟧ про гитхаб"
-    assert "Leave markers like ⟦1⟧" in system and "GigaAM, GitHub." in system and "«гитхаб» → «GitHub»" in system
+    assert "Leave markers like ⟦1⟧" in system and "like this: GigaAM." in system and "«гитхаб» → «GitHub»" in system
 
 
 def test_translation_of_english_speech_is_plain_cleanup():
@@ -183,3 +214,97 @@ def test_broken_or_runaway_translation_raises():
         _dictator("").translate(raw, "default")
     with pytest.raises(ValueError):
         _dictator("Sure! Here is the email: " + "bla " * 50).translate(raw, "default")
+
+
+class SpanAsr:
+    """Names each span by its start, and remembers which spans it was asked for."""
+
+    def __init__(self):
+        self.calls = []
+
+    def transcribe_spans(self, audio, spans):
+        self.calls.append(spans)
+        return [f"{start:g}" for start, _ in spans]
+
+
+def loud_models():
+    """VAD that hears every non-zero sample, so a span ends only when silence follows it, like Silero."""
+
+    def speech_spans(audio):
+        loud = np.flatnonzero(np.diff(np.concatenate([[0], audio != 0, [0]]).astype(int)))
+        spans = [(start / 16_000, end / 16_000) for start, end in zip(loud[::2], loud[1::2], strict=True)]
+        return merge_close_spans(spans, 0.6, 20.0)
+
+    asr = SpanAsr()
+    lid = SimpleNamespace(calls=[])
+    lid.detect = lambda audio, spans: lid.calls.append(spans) or "ru"
+    return SimpleNamespace(vad=SimpleNamespace(speech_spans=speech_spans), lid=lid, asr_for=lambda _: asr, asr=asr)
+
+
+def _speech(*parts):
+    """Seconds of speech and silence in turns, starting with speech."""
+    return np.concatenate(
+        [np.full(int(s * 16_000), 0.5 if i % 2 == 0 else 0.0, np.float32) for i, s in enumerate(parts)]
+    )
+
+
+@pytest.fixture
+def models():
+    return loud_models()
+
+
+def test_stream_recognizes_a_phrase_once_the_next_one_starts(models):
+    audio = _speech(1, 1, 1, 0.3, 1)
+    stream = DictationStream(Dictator(models, DictationConfig(), language="ru"))
+    stream.add(audio[:24_000])
+    stream.step()
+    assert models.asr.calls == []
+    stream.add(audio[24_000:40_000])
+    stream.step()
+    assert models.asr.calls == [[(0.0, 1.0)]]
+    stream.add(audio[40_000:])
+    assert stream.finish() == ("0 2", "ru")
+    assert models.asr.calls == [[(0.0, 1.0)], [(2.0, 4.3)]]
+    assert stream.live > 0
+
+
+def test_streamed_text_matches_the_whole_recording(models):
+    audio = _speech(1.2, 0.8, 2, 1, 0.5, 0.7, 3, 0.2)
+    dictator = Dictator(models, DictationConfig(), language="ru")
+    stream = DictationStream(dictator)
+    for start in range(0, len(audio), 16_000):
+        stream.add(audio[start : start + 16_000])
+        stream.step()
+    assert stream.finish() == dictator.recognize(audio)
+
+
+def test_auto_language_waits_for_three_seconds_of_finished_speech(models):
+    audio = _speech(2, 1, 2, 1, 1)
+    stream = DictationStream(Dictator(models, DictationConfig(), language=AUTO))
+    stream.add(audio[: 4 * 16_000])
+    stream.step()
+    assert (models.lid.calls, models.asr.calls) == ([], [])
+    stream.add(audio[4 * 16_000 :])
+    stream.step()
+    assert (models.lid.calls, models.asr.calls) == ([[(0.0, 2.0), (3.0, 5.0)]], [[(0.0, 2.0), (3.0, 5.0)]])
+    assert stream.finish() == ("0 3 6", "ru")
+    assert len(models.lid.calls) == 1
+
+
+def test_short_auto_dictation_detects_the_language_at_the_end(models):
+    stream = DictationStream(Dictator(models, DictationConfig(), language=AUTO))
+    stream.add(_speech(1, 1, 1))
+    stream.step()
+    assert stream.finish() == ("0 2", "ru")
+    assert models.lid.calls == [[(0.0, 1.0), (2.0, 3.0)]]
+
+
+def test_streamed_dictation_reports_live_and_final_asr(models):
+    dictator = _dictator("Текст", cleanup=False)
+    dictator.models = models
+    stream = DictationStream(dictator)
+    stream.add(_speech(1, 1, 1))
+    stream.step()
+    dictation = dictator.dictate(stream.audio, stream=stream)
+    assert dictation.raw == "0 2"
+    assert set(dictation.timings) == {"asr", "asr_live", "llm"}

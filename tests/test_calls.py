@@ -41,6 +41,9 @@ class FakeLLM(LLM):
         self.requests.append((system, user))
         return "**Тема** — проверка."
 
+    def count_tokens(self, text):
+        return len(text.split())
+
 
 def fake_models(language="ru", turns=None):
     asr = {"ru": FakeAsr(), "en": FakeAsr()}

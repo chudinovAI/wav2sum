@@ -48,7 +48,9 @@ class Vocabulary:
 
     def apply(self, text: str) -> str:
         for heard, written in self.pairs.items():
-            text = re.sub(rf"(?<!\w){re.escape(heard)}(?!\w)", written, text, flags=re.I)
+            # An abbreviation like "CD" matches only as written, so "cd" in a shell command stays.
+            flags = 0 if any(c.isupper() for c in heard[1:]) else re.I
+            text = re.sub(rf"(?<!\w){re.escape(heard)}(?!\w)", written, text, flags=flags)
         return text
 
     def _save(self) -> None:

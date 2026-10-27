@@ -8,6 +8,8 @@ A local Krisp + Wispr Flow for macOS: call recording with a transcript and a sum
 - Lint: `uv run ruff check && uv run ruff format --check`
 - Typecheck Swift (macOS only): `swiftc -typecheck wav2sum/native/app/*.swift && swiftc -typecheck wav2sum/native/capture.swift && swiftc -typecheck wav2sum/native/app/Logo.swift wav2sum/native/icon/main.swift`
 - Run: `uv run wav2sum app` (menu bar app and daemon), `uv run wav2sum tui`, `uv run wav2sum meeting.mp3`
+- Dictation latency from the history (read-only): `uv run python -m wav2sum.latency`
+- Convert the GigaAM encoder to Core ML (macOS only): `uv run --group coreml python -m wav2sum.coreml`
 
 CI (`.github/workflows/ci.yml`) runs ruff on Linux and the tests (with coverage, at least 80%) and the Swift typecheck on `macos-15`. The tests also pass on Linux.
 
@@ -75,3 +77,4 @@ CI (`.github/workflows/ci.yml`) runs ruff on Linux and the tests (with coverage,
      - Do not edit migrations/. These files are already applied on production. -->
 
 - Do not add "Generated with Claude Code" or similar lines to PR descriptions, commit messages or GitHub comments, and do not add Claude as a co-author (`Co-Authored-By`, `Claude-Session` trailers). I am the only author of the commits.
+- My shell is fish: give me commands in fish syntax (`set VAR value`, `env VAR=value cmd`), not bash.

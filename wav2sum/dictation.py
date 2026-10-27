@@ -1,3 +1,4 @@
+import itertools
 import logging
 import re
 import time
@@ -9,6 +10,7 @@ from wav2sum.config import AUTO, DictationConfig
 from wav2sum.language import EN, RU
 from wav2sum.llm import LLM
 from wav2sum.models import Models
+from wav2sum.vad import MERGE_GAP_SEC
 from wav2sum.vocabulary import Vocabulary
 
 logger = logging.getLogger(__name__)
@@ -208,6 +210,7 @@ TITLE_STYLES = [
 
 MAX_GROWTH = 1.5
 MAX_PROMPT_FIXES = 40
+LANGUAGE_SPEECH_SEC = 3.0
 
 
 @dataclass
@@ -236,7 +239,9 @@ class Dictator:
         self.language = language
         # The user is waiting on the HUD: past this, the raw text goes out uncleaned.
         # Unloaded after 10 idle minutes; the first dictation after that pays ~1.5 s to reload.
-        self.llm = LLM(cfg.model, num_ctx=num_ctx, temperature=0.2, think=False, keep_alive=600, timeout=30)
+        self.llm = LLM(
+            cfg.model, num_ctx=num_ctx, temperature=0.2, think=False, keep_alive=600, timeout=30, cache_prefix=True
+        )
 
     def warm_up(self) -> None:
         self.models.preload([RU, EN] if self.language == AUTO else [self.language])
@@ -255,10 +260,13 @@ class Dictator:
         command: bool = False,
         *,
         translate: bool = False,
+        stream: "DictationStream | None" = None,
     ) -> Dictation:
         started = time.monotonic()
-        raw, language = self.recognize(audio)
+        raw, language = stream.finish() if stream else self.recognize(audio)
         timings = {"asr": time.monotonic() - started}
+        if stream:
+            timings["asr_live"] = stream.live
         style = style_for(app, title, self.cfg.apps)
 
         started = time.monotonic()
@@ -275,11 +283,9 @@ class Dictator:
         return Dictation(raw, text, style, language, command, timings, translate)
 
     def recognize(self, audio: np.ndarray) -> tuple[str, str]:
-        spans = self.models.vad.speech_spans(audio)
-        if not spans:
-            return "", self.language if self.language != AUTO else RU
-        language = self.models.lid.detect(audio, spans) if self.language == AUTO else self.language
-        return " ".join(t for t in self.models.asr_for(language).transcribe_spans(audio, spans) if t), language
+        stream = DictationStream(self)
+        stream.add(audio)
+        return stream.finish()
 
     def clean(self, raw: str, style: str, language: str = RU) -> str:
         marked, snippets = mark_snippets(raw, self.cfg.snippets)
@@ -291,6 +297,8 @@ class Dictator:
                     self._prompt("cleanup", style, markers=bool(snippets), language=language),
                     marked,
                     PROMPTS[language].examples,
+                    MAX_GROWTH,
+                    lookup=True,
                 )
             except Exception as e:
                 logger.warning("Cleanup failed, inserting raw text: %s", e)
@@ -306,7 +314,9 @@ class Dictator:
         # Unlike clean(), a failed translation raises: Russian text pasted where English is expected is worse than none,
         # and the app beeps on the error.
         marked, snippets = mark_snippets(raw, self.cfg.snippets)
-        text = self.llm.chat(self._prompt("translate", style, markers=bool(snippets)), marked, TRANSLATE_EXAMPLES)
+        text = self.llm.chat(
+            self._prompt("translate", style, markers=bool(snippets)), marked, TRANSLATE_EXAMPLES, MAX_GROWTH
+        )
         if not text or len(text) > MAX_GROWTH * len(marked) + 40:
             raise ValueError(f"translation rejected ({len(marked)} → {len(text)} chars)")
         if style == "chat":
@@ -319,11 +329,59 @@ class Dictator:
         parts = [base, prompts.styles.get(style, "")]
         if markers:
             parts.append(prompts.markers)
-        if words := list(dict.fromkeys([*self.cfg.dictionary, *self.vocabulary.words])):
-            parts.append(prompts.words.format(", ".join(words)))
+        # Learned words go in only as "heard → written" pairs: a bare list makes the LLM swap in words that merely
+        # sound a bit alike ("ядра Кёрлы" → "ядра CoreML").
+        if self.cfg.dictionary:
+            parts.append(prompts.words.format(", ".join(self.cfg.dictionary)))
         if language == RU and (fixes := list(self.vocabulary.pairs.items())[-MAX_PROMPT_FIXES:]):
             parts.append(prompts.fixes.format(", ".join(f"«{heard}» → «{written}»" for heard, written in fixes)))
         return "\n\n".join(p for p in parts if p)
+
+
+class DictationStream:
+    """Recognizes a dictation while it is still being spoken: each VAD span as soon as the next one starts too far
+    away to merge with it, so after the key is released only the last span is left."""
+
+    def __init__(self, dictator: Dictator):
+        self.models = dictator.models
+        # With `auto`, the language comes from the first finished spans and holds to the end of the dictation.
+        self.language = None if dictator.language == AUTO else dictator.language
+        self.chunks: list[np.ndarray] = []
+        self.texts: dict[tuple[float, float], str] = {}
+        self.live = 0.0
+
+    @property
+    def audio(self) -> np.ndarray:
+        return np.concatenate(self.chunks) if self.chunks else np.zeros(0, np.float32)
+
+    def add(self, audio: np.ndarray) -> None:
+        self.chunks.append(audio)
+
+    def step(self) -> None:
+        started = time.monotonic()
+        audio = self.audio
+        spans = self.models.vad.speech_spans(audio)
+        done = [span for span, after in itertools.pairwise(spans) if after[0] - span[1] >= MERGE_GAP_SEC]
+        if self.language is None and sum(end - start for start, end in done) >= LANGUAGE_SPEECH_SEC:
+            self.language = self.models.lid.detect(audio, done)
+        if self.language:
+            self._transcribe(audio, done)
+        self.live += time.monotonic() - started
+
+    def finish(self) -> tuple[str, str]:
+        audio = self.audio
+        spans = self.models.vad.speech_spans(audio)
+        if not spans:
+            return "", self.language or RU
+        if self.language is None:
+            self.language = self.models.lid.detect(audio, spans)
+        self._transcribe(audio, spans)
+        return " ".join(self.texts[span] for span in spans if self.texts[span]), self.language
+
+    def _transcribe(self, audio: np.ndarray, spans: list[tuple[float, float]]) -> None:
+        if new := [span for span in spans if span not in self.texts]:
+            texts = self.models.asr_for(self.language).transcribe_spans(audio, new)
+            self.texts.update(zip(new, texts, strict=True))
 
 
 def style_for(app: str | None, title: str | None, overrides: dict[str, str]) -> str:

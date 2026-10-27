@@ -35,6 +35,9 @@ dev = [
     "pytest-timeout>=2.4.0",
     "ruff>=0.16.9",
 ]
+coreml = [
+    "coremltools>=9.0",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -11,11 +11,14 @@ class FakeLLM(LLM):
         self.prompts.append(system)
         return "заметки"
 
+    def count_tokens(self, text: str) -> int:
+        return len(text.split())
+
 
 def test_chunks_keep_utterances_whole_and_in_order():
     utterances = [f"Спикер {i % 2}: " + "слово " * 20 for i in range(10)]
     transcript = "\n\n".join(utterances)
-    chunks = chunk_transcript(transcript, max_chars=300)
+    chunks = chunk_transcript(transcript, 300, len)
     assert len(chunks) > 1
     assert all(len(c) <= 300 for c in chunks)
     assert "\n\n".join(chunks) == transcript
@@ -59,7 +62,31 @@ def test_long_call_is_summarized_from_notes_on_its_parts():
 
 def test_an_utterance_longer_than_a_chunk_is_kept_whole():
     long = "Я: " + "слово " * 100
-    assert chunk_transcript(f"Я: да\n\n{long}\n\nОн: нет", max_chars=50) == ["Я: да", long, "Он: нет"]
+    assert chunk_transcript(f"Я: да\n\n{long}\n\nОн: нет", 50, len) == ["Я: да", long, "Он: нет"]
+
+
+def test_a_call_that_fits_in_tokens_goes_in_one_pass_whatever_its_length_in_chars():
+    llm = FakeLLM(num_ctx=4096 + 1000)
+    summarize("Я: " + "антидисэстаблишментарианство " * 300, llm)
+    assert len(llm.prompts) == 1
+
+
+def test_the_system_prompt_with_its_glossary_counts_against_the_budget():
+    transcript = "\n\n".join(["Я: " + "слово " * 30] * 10)
+    llm = FakeLLM(num_ctx=4096 + 1000)
+    summarize(transcript, llm)
+    assert len(llm.prompts) == 1
+
+    llm = FakeLLM(num_ctx=4096 + 1000)
+    summarize(transcript, llm, [f"термин{i}" for i in range(500)])
+    assert len(llm.prompts) > 1
+
+
+def test_chunks_fit_the_token_budget():
+    utterances = [f"Спикер {i % 2}: " + "слово " * (i + 1) for i in range(20)]
+    chunks = chunk_transcript("\n\n".join(utterances), 40, lambda text: len(text.split()))
+    assert len(chunks) > 1
+    assert all(len(c.split()) <= 40 for c in chunks)
 
 
 def test_summary_ends_with_chapters_and_part_notes_keep_topic_timestamps():

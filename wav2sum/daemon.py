@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import ctypes
+import functools
 import itertools
 import json
 import logging
@@ -26,7 +27,7 @@ from wav2sum.config import (
     Config,
     write_default_config,
 )
-from wav2sum.dictation import Dictator
+from wav2sum.dictation import DictationStream, Dictator
 from wav2sum.history import append_dictation
 from wav2sum.llm import LLM, memory_mb
 from wav2sum.models import Models
@@ -69,6 +70,8 @@ class Daemon:
         self.job_ids = itertools.count(1)
         self.connections: set[asyncio.StreamWriter] = set()
         self.subscribers: set[asyncio.StreamWriter] = set()
+        # A dictation being spoken on each connection, with its recognition step in flight.
+        self.streams: dict[asyncio.StreamWriter, tuple[DictationStream, asyncio.Task | None]] = {}
 
     async def run(self) -> None:
         self.loop = asyncio.get_running_loop()
@@ -117,6 +120,7 @@ class Daemon:
         finally:
             self.connections.discard(writer)
             self.subscribers.discard(writer)
+            self.streams.pop(writer, None)
             writer.close()
 
     async def _handle(self, request: dict, writer: asyncio.StreamWriter) -> dict:
@@ -126,8 +130,10 @@ class Daemon:
             case "subscribe":
                 self.subscribers.add(writer)
                 return self.status()
+            case "dictate_audio":
+                return self._dictate_audio(request, writer)
             case "dictate":
-                return await self._dictate(request)
+                return await self._dictate(request, writer)
             case "correction":
                 return self._learn(request["original"], request["edited"])
             case "record_start":
@@ -160,11 +166,35 @@ class Daemon:
             "jobs": [asdict(j) for j in self.jobs[-20:]],
         }
 
-    async def _dictate(self, request: dict) -> dict:
+    def _dictate_audio(self, request: dict, writer: asyncio.StreamWriter) -> dict:
+        if request.get("first"):
+            self.streams[writer] = (DictationStream(self.dictator), None)
+        stream, step = self._stream(writer)
+        stream.add(pcm16_to_float(base64.b64decode(request["audio"])))
+        # One step at a time: audio that comes in meanwhile waits for the next chunk or the final `dictate`.
+        if self.ready.is_set() and (step is None or step.done()):
+            self.streams[writer] = (stream, asyncio.create_task(asyncio.to_thread(stream.step)))
+        return {}
+
+    def _stream(self, writer: asyncio.StreamWriter) -> tuple[DictationStream, asyncio.Task | None]:
+        if writer not in self.streams:
+            raise RuntimeError("no dictation in progress on this connection")
+        return self.streams[writer]
+
+    async def _dictate(self, request: dict, writer: asyncio.StreamWriter) -> dict:
         await self.ready.wait()
         audio = pcm16_to_float(base64.b64decode(request["audio"]))
+        dictate = self.dictator.dictate
+        if request.get("streamed"):
+            stream, step = self._stream(writer)
+            del self.streams[writer]
+            stream.add(audio)
+            if step:
+                await step
+            audio = stream.audio
+            dictate = functools.partial(dictate, stream=stream)
         result = await asyncio.to_thread(
-            self.dictator.dictate,
+            dictate,
             audio,
             app=request.get("app"),
             title=request.get("title"),
@@ -296,6 +326,8 @@ class Daemon:
             except Exception as e:
                 logger.exception("Job %d failed", job.id)
                 self._update(job, state="failed", error=str(e))
+            if self.queue.empty():
+                await asyncio.to_thread(self.models.unload, "diarizer")
 
     def _update(self, job: Job, state: str, stage: str | None = None, **fields) -> None:
         job.state = state

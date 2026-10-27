@@ -3,6 +3,7 @@ import base64
 import contextlib
 import functools
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -109,6 +110,11 @@ def test_summary_model_stays_as_long_as_dictation_when_shared_else_a_minute():
     cfg = Config()
     cfg.dictation.model = cfg.model
     assert daemon.Daemon(cfg).summary_llm.keep_alive == 600
+
+
+def test_only_dictation_caches_its_prompt_prefix():
+    d = daemon.Daemon(Config())
+    assert (d.dictator.llm.cache_prefix, d.summary_llm.cache_prefix) == (True, False)
 
 
 @contextlib.asynccontextmanager
@@ -271,6 +277,32 @@ def test_jobs_run_after_models_load_and_report_failures(tmp_path, monkeypatch):
     asyncio.run(scenario())
 
 
+def test_pyannote_is_unloaded_once_the_queue_is_empty(tmp_path, monkeypatch):
+    unloaded = []
+
+    def fake_process(audio, *_, **__):
+        unloaded.append(audio.name)
+        if audio.name == "broken.wav":
+            raise RuntimeError("ffmpeg failed")
+        return type("Result", (), {"out_dir": tmp_path})()
+
+    monkeypatch.setattr(daemon, "process", fake_process)
+
+    async def scenario():
+        d = _daemon(tmp_path, monkeypatch, asyncio.Queue())
+        monkeypatch.setattr(d.models, "unload", unloaded.append)
+        for name in ("good.wav", "broken.wav"):
+            (tmp_path / name).write_bytes(b"")
+            d._enqueue(tmp_path / name)
+        d.ready.set()
+        working = asyncio.create_task(d._work())
+        await asyncio.sleep(0.2)
+        assert unloaded == ["good.wav", "broken.wav", "diarizer"]
+        working.cancel()
+
+    asyncio.run(scenario())
+
+
 def test_a_failed_warm_up_is_logged(tmp_path, monkeypatch, caplog):
     async def scenario():
         d = _daemon(tmp_path, monkeypatch, asyncio.Queue())
@@ -315,3 +347,56 @@ def test_client_reports_a_missing_or_lost_daemon(monkeypatch, socket_path):
         server.close()
 
     asyncio.run(scenario())
+
+
+def _loud_models():
+    """Hears every non-zero sample and names each span by its start."""
+
+    def speech_spans(audio):
+        loud = np.flatnonzero(np.diff(np.concatenate([[0], audio != 0, [0]]).astype(int)))
+        return [(start / 16_000, end / 16_000) for start, end in zip(loud[::2], loud[1::2], strict=True)]
+
+    asr = SimpleNamespace(transcribe_spans=lambda audio, spans: [f"{start:g}" for start, _ in spans])
+    return SimpleNamespace(vad=SimpleNamespace(speech_spans=speech_spans), asr_for=lambda _: asr)
+
+
+def _pcm(audio):
+    return base64.b64encode((audio * 32767).astype("<i2").tobytes()).decode()
+
+
+def test_streamed_dictation_matches_a_whole_one(tmp_path, monkeypatch, socket_path):
+    history = []
+    monkeypatch.setattr(daemon, "append_dictation", history.append)
+    # Under the 64 KB line limit of the test server: speech 0.3 s, silence 0.7 s, speech 0.3 s.
+    audio = np.concatenate(
+        [np.full(int(s * 16_000), loud, np.float32) for s, loud in ((0.3, 0.5), (0.7, 0), (0.3, 0.5))]
+    )
+
+    async def scenario():
+        d = _daemon(tmp_path, monkeypatch, asyncio.Queue())
+        d.ready.set()
+        d.dictator.models = _loud_models()
+        d.dictator.cfg.cleanup = False
+        d.dictator.language = "ru"
+        async with _serving(d, socket_path) as connected:
+            whole = await connected.dictate(audio, app="ru.keepcoder.Telegram")
+            await connected.request("dictate_audio", audio=_pcm(np.ones(8_000, np.float32)), first=True)
+            await connected.request("dictate_audio", audio=_pcm(audio[:9_600]), first=True)
+            await connected.request("dictate_audio", audio=_pcm(audio[9_600:17_600]))
+            await asyncio.sleep(0.1)
+            streamed = await connected.request(
+                "dictate", audio=_pcm(audio[17_600:]), streamed=True, app="ru.keepcoder.Telegram"
+            )
+            with pytest.raises(DaemonError, match="no dictation"):
+                await connected.request("dictate", audio=_pcm(audio), streamed=True)
+            await connected.request("dictate_audio", audio=_pcm(audio), first=True)
+        await asyncio.sleep(0.1)
+        assert d.streams == {}
+        return whole, streamed
+
+    whole, streamed = asyncio.run(scenario())
+    assert streamed["raw"] == whole["raw"] == "0 1"
+    assert "asr_live" in streamed["timings"]
+    del whole["time"], streamed["time"], whole["timings"], streamed["timings"]
+    assert streamed == whole
+    assert [entry["raw"] for entry in history] == ["0 1", "0 1"]
