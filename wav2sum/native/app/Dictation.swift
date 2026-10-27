@@ -1,6 +1,7 @@
 import AppKit
 import AVFoundation
 import ApplicationServices
+import CoreAudio
 
 final class Hotkey {
     enum Key: String {
@@ -96,6 +97,11 @@ final class Microphone {
         // changes, installTap raises an Objective-C exception that `try` can't catch.
         engine = AVAudioEngine()
         let input = engine.inputNode
+        if var device = Self.builtInIfBluetooth() {
+            Log.write("microphone: Bluetooth input, recording from the built-in one")
+            AudioUnitSetProperty(input.audioUnit!, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
+                                 &device, UInt32(MemoryLayout<AudioDeviceID>.size))
+        }
         let format = input.outputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else {
             throw NSError(domain: "wav2sum", code: 1, userInfo: [NSLocalizedDescriptionKey: "no input device"])
@@ -107,6 +113,31 @@ final class Microphone {
         }
         engine.prepare()
         try engine.start()
+    }
+
+    /// CHU-129: AirPods give silence for up to 0.8 s after the press, the Mac's microphone for 0.19 s,
+    /// so with a Bluetooth input we record from the built-in microphone, as Wispr Flow does.
+    private static func builtInIfBluetooth() -> AudioDeviceID? {
+        let system = AudioObjectID(kAudioObjectSystemObject)
+        let bluetooth = [kAudioDeviceTransportTypeBluetooth, kAudioDeviceTransportTypeBluetoothLE]
+        guard let input = property(system, kAudioHardwarePropertyDefaultInputDevice).first,
+              property(input, kAudioDevicePropertyTransportType).contains(where: bluetooth.contains)
+        else { return nil }
+        return property(system, kAudioHardwarePropertyDevices).first {
+            property($0, kAudioDevicePropertyTransportType) == [kAudioDeviceTransportTypeBuiltIn]
+                && !property($0, kAudioDevicePropertyStreams, kAudioObjectPropertyScopeInput).isEmpty
+        }
+    }
+
+    /// A CoreAudio property made of UInt32 values: device ids, stream ids or the transport type.
+    private static func property(_ id: AudioObjectID, _ selector: AudioObjectPropertySelector,
+                                 _ scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal) -> [UInt32] {
+        var address = AudioObjectPropertyAddress(mSelector: selector, mScope: scope, mElement: kAudioObjectPropertyElementMain)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(id, &address, 0, nil, &size) == noErr else { return [] }
+        var values = [UInt32](repeating: 0, count: Int(size) / MemoryLayout<UInt32>.size)
+        guard AudioObjectGetPropertyData(id, &address, 0, nil, &size, &values) == noErr else { return [] }
+        return values
     }
 
     func stop() -> [Float] {
