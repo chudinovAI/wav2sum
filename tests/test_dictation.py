@@ -90,7 +90,7 @@ class ScriptedLLM:
         self.growths = []
         self.lookups = []
 
-    def chat(self, system, user, examples=(), max_growth=None, lookup=False):
+    def chat(self, system, user, examples=(), *, max_growth=None, lookup=False):
         self.requests.append((system, user))
         self.growths.append(max_growth)
         self.lookups.append(lookup)
