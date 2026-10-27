@@ -183,6 +183,25 @@ final class StereoWriter {
     }
 }
 
+/// The app's bundle folder for a process object, so that helpers inside the bundle (Zoom's caphost and CptHost) match too.
+func appBundlePath(_ id: AudioObjectID) -> String? {
+    guard let pid = try? readValue(id, kAudioProcessPropertyPID, initial: pid_t(0)) else { return nil }
+    var buffer = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+    guard proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else { return nil }
+    let path = String(cString: buffer)
+    guard let end = path.range(of: ".app/") else { return path }
+    return String(path[..<end.upperBound])
+}
+
+/// The process objects of the app with this bundle id and of all processes from its bundle.
+func appProcesses(_ bundleID: String) -> [AudioObjectID] {
+    let system = AudioObjectID(kAudioObjectSystemObject)
+    guard let ids = try? readArray(system, kAudioHardwarePropertyProcessObjectList, of: AudioObjectID.self) else { return [] }
+    let paths = ids.map { ($0, appBundlePath($0)) }
+    let apps = Set(paths.filter { readString($0.0, kAudioProcessPropertyBundleID) == bundleID }.compactMap { $0.1 })
+    return paths.filter { $0.1.map(apps.contains) ?? false }.map { $0.0 }
+}
+
 final class Recorder {
     private var tapID = AudioObjectID(kAudioObjectUnknown)
     private var aggregateID = AudioObjectID(kAudioObjectUnknown)
@@ -190,11 +209,21 @@ final class Recorder {
     private let writer: StereoWriter
     private let mic: InputDevice
     private let sampleRate: Double
+    private let tap: CATapDescription
+    private let app: String?
+    private var processes: [AudioObjectID] = []
 
-    init(url: URL, mic: InputDevice, outRate: Double) throws {
+    /// With `app`, the system channel is only that app's sound; without it, all sound of the Mac.
+    init(url: URL, mic: InputDevice, outRate: Double, app: String?) throws {
         self.mic = mic
+        self.app = app
 
-        let tap = CATapDescription(stereoGlobalTapButExcludeProcesses: [])
+        if let app {
+            processes = appProcesses(app)
+            tap = CATapDescription(stereoMixdownOfProcesses: processes)
+        } else {
+            tap = CATapDescription(stereoGlobalTapButExcludeProcesses: [])
+        }
         tap.uuid = UUID()
         tap.name = "wav2sum system audio"
         tap.isPrivate = true
@@ -269,7 +298,21 @@ final class Recorder {
         }, "AudioDeviceCreateIOProcIDWithBlock")
 
         try check(AudioDeviceStart(aggregateID, ioProcID), "AudioDeviceStart")
-        emit(["event": "started", "mic": mic.name, "device_rate": sampleRate, "streams": streams])
+        emit(["event": "started", "mic": mic.name, "device_rate": sampleRate, "streams": streams, "processes": processes])
+    }
+
+    /// A call app starts its helpers during the call and can restart them; the tap follows the new processes.
+    func followApp() throws {
+        guard let app else { return }
+        let current = appProcesses(app)
+        guard current != processes else { return }
+        processes = current
+        tap.processes = current
+        var addr = address(kAudioTapPropertyDescription)
+        var description = tap
+        try check(AudioObjectSetPropertyData(tapID, &addr, 0, nil, UInt32(MemoryLayout<CATapDescription>.size), &description),
+                  "update tap processes")
+        emit(["event": "processes", "processes": current])
     }
 
     func flush() throws -> (Double, Double)? { try writer.flush() }
@@ -354,9 +397,10 @@ func option(_ name: String) -> String? {
 reexecDisclaimed()
 
 let micQuery = option("--mic")
+let app = option("--app")
 let outRate = Double(option("--sample-rate") ?? "16000") ?? 16_000
 guard let outPath = args.first else {
-    FileHandle.standardError.write("usage: wav2sum-capture <out.wav> [--mic <name|uid>] [--sample-rate 16000] | --list-devices | --watch-inputs\n".data(using: .utf8)!)
+    FileHandle.standardError.write("usage: wav2sum-capture <out.wav> [--mic <name|uid>] [--app <bundle id>] [--sample-rate 16000] | --list-devices | --watch-inputs\n".data(using: .utf8)!)
     exit(2)
 }
 
@@ -377,7 +421,7 @@ try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), wi
 
 let recorder: Recorder
 do {
-    recorder = try Recorder(url: url, mic: mic, outRate: outRate)
+    recorder = try Recorder(url: url, mic: mic, outRate: outRate, app: app)
     try recorder.start()
 } catch { fail("\(error)") }
 
@@ -385,6 +429,7 @@ let flushTimer = DispatchSource.makeTimerSource(queue: .main)
 flushTimer.schedule(deadline: .now() + 0.25, repeating: 0.25)
 flushTimer.setEventHandler {
     if getppid() == 1 { shutdown() }
+    do { try recorder.followApp() } catch { emit(["event": "warning", "message": "\(error)"]) }
     do {
         if let (micDb, sysDb) = try recorder.flush() {
             emit(["event": "level", "t": (recorder.seconds * 100).rounded() / 100,
