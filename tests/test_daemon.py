@@ -249,6 +249,19 @@ def test_processing_a_missing_file_fails_and_an_existing_one_is_queued(tmp_path,
     asyncio.run(scenario())
 
 
+def test_recordings_without_a_result_are_queued_at_start(tmp_path, monkeypatch):
+    async def scenario():
+        d = _daemon(tmp_path, monkeypatch, asyncio.Queue())
+        for name in ("call-1.wav", "call-2.wav", "call-2.json"):
+            (tmp_path / name).write_bytes(b"")
+        (tmp_path / "output" / "call-1").mkdir(parents=True)
+        d._enqueue_unprocessed()
+        assert [j.audio for j in d.jobs] == [str(tmp_path / "call-2.wav")]
+        assert d.queue.qsize() == 1
+
+    asyncio.run(scenario())
+
+
 def test_jobs_run_after_models_load_and_report_failures(tmp_path, monkeypatch):
     def fake_process(audio, models, out_root, *, on_stage, **_):
         on_stage("Transcribing")

@@ -90,7 +90,7 @@ func emit(_ fields: [String: Any]) {
     guard let data = try? JSONSerialization.data(withJSONObject: fields, options: [.sortedKeys]),
           var line = String(data: data, encoding: .utf8) else { return }
     line += "\n"
-    FileHandle.standardError.write(line.data(using: .utf8)!)
+    try? FileHandle.standardError.write(contentsOf: line.data(using: .utf8)!)
 }
 
 func fail(_ message: String) -> Never {
@@ -384,6 +384,7 @@ do {
 let flushTimer = DispatchSource.makeTimerSource(queue: .main)
 flushTimer.schedule(deadline: .now() + 0.25, repeating: 0.25)
 flushTimer.setEventHandler {
+    if getppid() == 1 { shutdown() }
     do {
         if let (micDb, sysDb) = try recorder.flush() {
             emit(["event": "level", "t": (recorder.seconds * 100).rounded() / 100,
@@ -402,6 +403,7 @@ func shutdown() {
 
 signal(SIGINT, SIG_IGN)
 signal(SIGTERM, SIG_IGN)
+signal(SIGPIPE, SIG_IGN)
 var signalSources: [DispatchSourceSignal] = []
 for sig in [SIGINT, SIGTERM] {
     let src = DispatchSource.makeSignalSource(signal: sig, queue: .main)
