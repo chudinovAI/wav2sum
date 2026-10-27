@@ -1,5 +1,5 @@
 from wav2sum.llm import LLM
-from wav2sum.summarizer import chunk_transcript, summarize
+from wav2sum.summarizer import chapters, chunk_transcript, summarize
 
 
 class FakeLLM(LLM):
@@ -87,3 +87,51 @@ def test_chunks_fit_the_token_budget():
     chunks = chunk_transcript("\n\n".join(utterances), 40, lambda text: len(text.split()))
     assert len(chunks) > 1
     assert all(len(c.split()) <= 40 for c in chunks)
+
+
+class ChaptersLLM(FakeLLM):
+    def __init__(self, reply, num_ctx=16384):
+        super().__init__(num_ctx)
+        self.reply = reply
+        self.calls = []
+
+    def chat(self, system, user, examples=(), max_growth=None, think=None):
+        self.calls.append((system, user, max_growth, think))
+        return self.reply
+
+
+TRANSCRIPT = "[00:01 – 00:04] Я: Привет\n\n[01:25 – 01:30] Илья: Про GPU\n\n[1:02:03 – 1:02:09] Я: Пока"
+
+
+def test_chapters_keep_only_lines_at_utterance_starts_and_run_without_thinking():
+    llm = ChaptersLLM("Вот главы:\n- \n- 00:01 — Знакомство\n- 00:30 — Выдумка\n- 01:25 — GPU\n- 1:02:03 — Прощание")
+    assert chapters(TRANSCRIPT, llm) == "**Главы**\n- 00:01 — Знакомство\n- 01:25 — GPU\n- 1:02:03 — Прощание"
+    [(system, user, max_growth, think)] = llm.calls
+    assert system.startswith("Тебе дан транскрипт созвона с таймкодами")
+    assert user == TRANSCRIPT
+    assert think is False
+    assert max_growth is not None
+
+
+def test_english_chapters_get_an_english_prompt_and_title():
+    llm = ChaptersLLM("- 00:01 — Intro")
+    assert chapters(TRANSCRIPT, llm, language="en") == "**Chapters**\n- 00:01 — Intro"
+    assert llm.calls[0][0].startswith("You are given a call transcript with timestamps")
+
+
+def test_no_chapters_without_a_valid_line_or_when_the_reply_runs_away():
+    assert chapters(TRANSCRIPT, ChaptersLLM("- 00:30 — Выдумка")) == ""
+
+    class Looping(ChaptersLLM):
+        def chat(self, *args, **kwargs):
+            raise ValueError("LLM reply hit the 100-token limit")
+
+    assert chapters(TRANSCRIPT, Looping("")) == ""
+
+
+def test_a_long_call_gets_chapters_from_each_part():
+    transcript = "\n\n".join(f"[{i:02d}:00 – {i:02d}:30] Я: " + "слово " * 30 for i in range(10))
+    llm = ChaptersLLM("- 00:00 — Начало", num_ctx=4096 + 100)
+    assert chapters(transcript, llm) == "**Главы**\n" + "\n".join(["- 00:00 — Начало"] * len(llm.calls))
+    assert len(llm.calls) > 1
+    assert "\n\n".join(user for _, user, _, _ in llm.calls) == transcript

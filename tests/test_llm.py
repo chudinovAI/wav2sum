@@ -225,6 +225,11 @@ def test_think_turns_on_thinking(mlx):
     assert mlx.calls[0]["prompt"][-1] == ("reply", True)
 
 
+def test_a_call_can_turn_thinking_off(mlx):
+    LLM("gemma", think=True).chat("s", "u", think=False)
+    assert mlx.calls[0]["prompt"][-1] == ("reply", False)
+
+
 def test_reply_without_thinking_is_kept(mlx):
     mlx.reply = " просто ответ "
     assert LLM("gemma").chat("s", "u") == "просто ответ"

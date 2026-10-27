@@ -1,4 +1,5 @@
 import logging
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
@@ -94,6 +95,23 @@ don't make anything up.\
 """
 
 
+CHAPTERS_PROMPT_RU = """\
+Тебе дан транскрипт созвона с таймкодами реплик.
+Раздели разговор на главы по темам, по порядку, не больше 8. Новая глава начинается там, где разговор переходит \
+к другой теме.
+Ответ — только строки глав, каждая вида «- мм:сс — тема в нескольких словах», где мм:сс — таймкод начала первой \
+реплики главы, скопированный из транскрипта. Без вступления и пояснений.\
+"""
+
+CHAPTERS_PROMPT_EN = """\
+You are given a call transcript with timestamps on each utterance.
+Split the conversation into chapters by topic, in order, at most 8. A new chapter starts where the conversation \
+moves on to another topic.
+Reply with chapter lines only, each as "- mm:ss — the topic in a few words", where mm:ss is the start timestamp of \
+the chapter's first utterance, copied from the transcript. No intro and no comments.\
+"""
+
+
 @dataclass(frozen=True)
 class Prompts:
     summary: str
@@ -102,6 +120,8 @@ class Prompts:
     transcript: str
     notes: str
     part: str
+    chapters: str
+    chapters_title: str
 
 
 PROMPTS = {
@@ -112,6 +132,8 @@ PROMPTS = {
         "Транскрипт созвона",
         "Заметки по частям созвона",
         "Часть",
+        CHAPTERS_PROMPT_RU,
+        "Главы",
     ),
     EN: Prompts(
         SUMMARY_PROMPT_EN,
@@ -120,6 +142,8 @@ PROMPTS = {
         "Call transcript",
         "Notes on parts of the call",
         "Part",
+        CHAPTERS_PROMPT_EN,
+        "Chapters",
     ),
 }
 
@@ -137,6 +161,22 @@ def summarize(transcript: str, llm: LLM, terms: Sequence[str] = (), language: st
     notes = [llm.chat(prompts.chunk + glossary, chunk) for chunk in chunks]
     joined = "\n\n".join(f"--- {prompts.part} {i} ---\n{n}" for i, n in enumerate(notes, 1))
     return llm.chat(prompts.summary + glossary, f"{prompts.notes}:\n\n{joined}")
+
+
+def chapters(transcript: str, llm: LLM, language: str = RU) -> str:
+    """Chapters from a timestamped transcript, in a call of their own without thinking: with the timestamps and
+    a chapters section in the summary prompt, the summary's thinking looped on re-checking them."""
+    prompts = PROMPTS[language]
+    starts = set(re.findall(r"^\[(\S+) – ", transcript, re.MULTILINE))
+    lines = []
+    try:
+        for chunk in chunk_transcript(transcript, (llm.num_ctx - RESERVED_TOKENS) * 2 // 3, llm.count_tokens):
+            reply = llm.chat(prompts.chapters, chunk, max_growth=0.2, think=False)
+            lines += [line for line in reply.splitlines() if line.startswith("- ") and line[2:].split(" ")[0] in starts]
+    except ValueError as e:
+        logger.warning("No chapters: %s", e)
+        return ""
+    return f"**{prompts.chapters_title}**\n" + "\n".join(lines) if lines else ""
 
 
 def chunk_transcript(transcript: str, max_tokens: int, count_tokens: Callable[[str], int]) -> list[str]:
