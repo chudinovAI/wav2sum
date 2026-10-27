@@ -127,6 +127,10 @@ class LLM:
             _timers[self.model] = timer = threading.Timer(self.keep_alive, lambda: _worker.submit(_unload, self.model))
             timer.daemon = True
             timer.start()
+        if thinking and tokenizer.has_thinking and tokenizer.think_start in text and tokenizer.think_end not in text:
+            # A summary's thinking can loop until the token limit (CHU-137); its thoughts must not be the reply.
+            logger.warning("The thinking did not end in %d tokens; asking again without it", limit)
+            return self._generate(messages, max_growth, lookup, False)
         if max_growth is not None and len(tokenizer.encode(text)) >= limit:
             raise ValueError(f"LLM reply hit the {limit}-token limit")
         if tokenizer.has_thinking:
