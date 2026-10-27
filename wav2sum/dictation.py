@@ -319,8 +319,10 @@ class Dictator:
         parts = [base, prompts.styles.get(style, "")]
         if markers:
             parts.append(prompts.markers)
-        if words := list(dict.fromkeys([*self.cfg.dictionary, *self.vocabulary.words])):
-            parts.append(prompts.words.format(", ".join(words)))
+        # Learned words go in only as "heard → written" pairs: a bare list makes the LLM swap in words that merely
+        # sound a bit alike ("ядра Кёрлы" → "ядра CoreML").
+        if self.cfg.dictionary:
+            parts.append(prompts.words.format(", ".join(self.cfg.dictionary)))
         if language == RU and (fixes := list(self.vocabulary.pairs.items())[-MAX_PROMPT_FIXES:]):
             parts.append(prompts.fixes.format(", ".join(f"«{heard}» → «{written}»" for heard, written in fixes)))
         return "\n\n".join(p for p in parts if p)
