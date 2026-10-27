@@ -294,6 +294,7 @@ class Dictator:
                     marked,
                     PROMPTS[language].examples,
                     MAX_GROWTH,
+                    lookup=True,
                 )
             except Exception as e:
                 logger.warning("Cleanup failed, inserting raw text: %s", e)

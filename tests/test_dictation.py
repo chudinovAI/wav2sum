@@ -78,10 +78,12 @@ class ScriptedLLM:
         self.reply = reply
         self.requests = []
         self.growths = []
+        self.lookups = []
 
-    def chat(self, system, user, examples=(), max_growth=None):
+    def chat(self, system, user, examples=(), max_growth=None, lookup=False):
         self.requests.append((system, user))
         self.growths.append(max_growth)
+        self.lookups.append(lookup)
         if isinstance(self.reply, Exception):
             raise self.reply
         return self.reply(user) if callable(self.reply) else self.reply
@@ -116,6 +118,15 @@ def test_cleanup_and_translation_limit_the_reply_but_a_command_does_not():
     dictator.models = fake_models("ru")
     dictator.dictate(np.zeros(16_000), selection="Текст", command=True)
     assert dictator.llm.growths == [MAX_GROWTH, MAX_GROWTH, None]
+
+
+def test_only_cleanup_drafts_its_reply_from_the_input():
+    dictator = _dictator("Текст")
+    dictator.clean("ну давай созвонимся в пятницу", "default")
+    dictator.translate("ну давай созвонимся в пятницу", "default")
+    dictator.models = fake_models("ru")
+    dictator.dictate(np.zeros(16_000), selection="Текст", command=True)
+    assert dictator.llm.lookups == [True, False, False]
 
 
 def test_cleanup_off_inserts_raw_text():

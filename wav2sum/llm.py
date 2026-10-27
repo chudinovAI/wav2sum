@@ -6,6 +6,7 @@ import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import partial
+from types import SimpleNamespace
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +20,8 @@ _timers: dict[str, threading.Timer] = {}
 # One prefix per app style in use (chat, code, email, a command); least recently used goes first.
 MAX_PREFIXES = 4
 _prefixes: dict[str, dict[tuple, list]] = {}
+# Tokens a lookup drafts from the prompt per pass: 4 was the fastest on real cleanups (CHU-120).
+LOOKUP_TOKENS = 4
 
 
 @dataclass
@@ -32,9 +35,15 @@ class LLM:
     cache_prefix: bool = False  # keep the KV cache of all but the last message while the weights are loaded
 
     def chat(
-        self, system: str, user: str, examples: list[tuple[str, str]] = (), max_growth: float | None = None
+        self,
+        system: str,
+        user: str,
+        examples: list[tuple[str, str]] = (),
+        max_growth: float | None = None,
+        lookup: bool = False,
     ) -> str:
-        """max_growth caps the reply at that many times the input's tokens, so a looping model stops early."""
+        """max_growth caps the reply at that many times the input's tokens, so a looping model stops early.
+        lookup drafts the reply from the prompt and checks several tokens a pass: faster for a reply that copies it."""
         logger.debug("→ %s: %d chars", self.model, len(user))
         shots = [
             {"role": role, "content": text}
@@ -43,10 +52,10 @@ class LLM:
         ]
         messages = [{"role": "system", "content": system}, *shots, {"role": "user", "content": user}]
         if self.timeout is None:
-            future = _worker.submit(self._generate, messages, max_growth)
+            future = _worker.submit(self._generate, messages, max_growth, lookup)
         else:
             future = Future()
-            _urgent.put((future, partial(self._generate, messages, max_growth)))
+            _urgent.put((future, partial(self._generate, messages, max_growth, lookup)))
             _worker.submit(_run_urgent)
         try:
             return future.result(self.timeout)
@@ -63,14 +72,16 @@ class LLM:
     def unload(self) -> None:
         _worker.submit(_unload, self.model).result()
 
-    def _generate(self, messages: list[dict], max_growth: float | None) -> str:
+    def _generate(self, messages: list[dict], max_growth: float | None, lookup: bool) -> str:
         from mlx_lm import stream_generate
         from mlx_lm.sample_utils import make_sampler
 
         if timer := _timers.pop(self.model, None):
             timer.cancel()
         model, tokenizer = _load(self.model)
-        prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=True, enable_thinking=bool(self.think))
+        prompt = whole = tokenizer.apply_chat_template(
+            messages, add_generation_prompt=True, enable_thinking=bool(self.think)
+        )
         limit = self.num_ctx
         if max_growth is not None:
             limit = min(limit, int(max_growth * len(tokenizer.encode(messages[-1]["content"]))) + 64)
@@ -88,14 +99,19 @@ class LLM:
         # A summary lets waiting dictations run between its prefill chunks and tokens; dictations wait their turn.
         yield_to_urgent = (lambda *_: _run_urgent()) if self.timeout is None else None
         text = ""
-        for response in stream_generate(
-            model,
-            tokenizer,
-            prompt,
-            max_tokens=limit,
-            sampler=make_sampler(self.temperature),
-            prompt_cache=cache,
-            prompt_progress_callback=yield_to_urgent,
+        sampler = make_sampler(self.temperature)
+        for response in (
+            _lookup_generate(model, tokenizer, whole, prompt, cache=cache, limit=limit, sampler=sampler)
+            if lookup
+            else stream_generate(
+                model,
+                tokenizer,
+                prompt,
+                max_tokens=limit,
+                sampler=sampler,
+                prompt_cache=cache,
+                prompt_progress_callback=yield_to_urgent,
+            )
         ):
             text += response.text
             if yield_to_urgent:
@@ -112,6 +128,52 @@ class LLM:
         if tokenizer.has_thinking:
             text = text.rpartition(tokenizer.think_end)[2]
         return text.strip()
+
+
+def _lookup_generate(model, tokenizer, whole: list, prompt: list, *, cache: list | None, limit: int, sampler):
+    """Speculative decoding with drafts copied from the prompt: the tokens that followed the last place where
+    the reply's latest tokens occur. The model checks a draft in one pass and keeps the tokens it would have
+    sampled itself, so the reply is the model's own; a cleanup mostly repeats its input, so most drafts pass."""
+    import mlx.core as mx
+    from mlx_lm.models.cache import trim_prompt_cache
+
+    cache = cache or _trimmable_cache(model)
+    if len(prompt) > 1:
+        model(mx.array([prompt[:-1]]), cache=cache)
+    tokens, reply = list(whole), []
+    while len(reply) < limit:
+        draft = _draft(tokens, min(LOOKUP_TOKENS, limit - len(reply) - 1))
+        logits = model(mx.array([[tokens[-1], *draft]]), cache=cache)[0]
+        sampled = sampler(logits - mx.logsumexp(logits, axis=-1, keepdims=True)).tolist()
+        n = 0
+        while n < len(draft) and sampled[n] == draft[n]:
+            n += 1
+        trim_prompt_cache(cache, len(draft) - n)
+        for token in sampled[: n + 1]:
+            if token in tokenizer.eos_token_ids:
+                yield SimpleNamespace(text=tokenizer.decode(reply))
+                return
+            tokens.append(token)
+            reply.append(token)
+    yield SimpleNamespace(text=tokenizer.decode(reply))
+
+
+def _draft(tokens: list, size: int) -> list:
+    for n in (3, 2, 1):
+        tail = tokens[-n:]
+        for i in range(len(tokens) - n - 1, -1, -1):
+            if tokens[i : i + n] == tail:
+                return tokens[i + n : i + n + size]
+    return []
+
+
+def _trimmable_cache(model) -> list:
+    """Gemma's sliding-window layers keep a rotating cache that can't take back tokens once the prompt is longer
+    than the window; a plain cache can, and the model's mask keeps the same window. At temperature 0 the reply
+    still differs by a few words from the rotating cache's in 7 of 50 cleanups (CHU-120)."""
+    from mlx_lm.models.cache import KVCache, make_prompt_cache
+
+    return [KVCache() for _ in make_prompt_cache(model)]
 
 
 def _run_urgent() -> None:
@@ -156,9 +218,9 @@ def _prefix_cache(name: str, model, prefix: tuple) -> list:
         caches[prefix] = caches.pop(prefix)  # the most recently used goes last
     else:
         import mlx.core as mx
-        from mlx_lm.models.cache import make_prompt_cache
 
-        cache = make_prompt_cache(model)
+        # Trimmable, so a cleanup's lookup can take back the draft tokens the model rejects.
+        cache = _trimmable_cache(model)
         model(mx.array([prefix]), cache=cache)
         mx.eval([layer.state for layer in cache])
         caches[prefix] = cache
