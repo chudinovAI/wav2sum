@@ -333,6 +333,12 @@ enum FocusedApp {
         return attribute(element, kAXValueAttribute) as? String
     }
 
+    /// Electron apps (Claude, Slack, VS Code) expose their text fields to Accessibility only when asked to.
+    static func exposeTextFields() {
+        guard let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier else { return }
+        AXUIElementSetAttributeValue(AXUIElementCreateApplication(pid), "AXManualAccessibility" as CFString, kCFBooleanTrue)
+    }
+
     static func ensureAccessibility(prompt: Bool) -> Bool {
         AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: prompt] as CFDictionary)
     }
@@ -377,8 +383,8 @@ enum Clipboard {
     }
 }
 
-/// Waits for a dictated text to be pasted somewhere, follows it in that field for a minute and reports how the user
-/// edited it, so the daemon can learn words.
+/// Waits for a dictated text to be pasted somewhere, follows it in that field for three minutes and reports how the
+/// user edited it, so the daemon can learn words.
 final class CorrectionWatcher {
     var onCorrection: ((_ original: String, _ edited: String) -> Void)?
 
@@ -393,13 +399,19 @@ final class CorrectionWatcher {
 
     func track(_ text: String) {
         finish()
+        FocusedApp.exposeTextFields()
+        let app = FocusedApp.bundleID ?? ""
         let deadline = Date().addingTimeInterval(30)
         waiting = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] timer in
             guard let self else { return timer.invalidate() }
-            if Date() > deadline { return self.finish() }
+            if Date() > deadline {
+                Log.write("corrections: pasted text not found in \(app)")
+                return self.finish()
+            }
             guard let element = FocusedApp.focusedElement, FocusedApp.text(of: element)?.contains(text) == true else { return }
             self.waiting?.invalidate()
             self.waiting = nil
+            Log.write("corrections: following the text in \(app)")
             self.begin(element, text)
         }
     }
@@ -410,7 +422,10 @@ final class CorrectionWatcher {
         if timer != nil { read() }
         timer?.invalidate()
         timer = nil
-        if let edited, edited != original { onCorrection?(original, edited) }
+        if let edited, edited != original {
+            Log.write("corrections: sending an edit of \(edited.count) chars")
+            onCorrection?(original, edited)
+        }
         element = nil
         edited = nil
     }
@@ -421,17 +436,19 @@ final class CorrectionWatcher {
         original = text
         before = String(value[..<range.lowerBound].suffix(40))
         after = String(value[range.upperBound...].prefix(40))
-        deadline = Date().addingTimeInterval(60)
+        deadline = Date().addingTimeInterval(180)
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             guard let self else { return }
             if Date() > self.deadline || !self.read() { self.finish() }
         }
     }
 
+    /// False once the text can't be followed any more; while another field has the focus it just waits.
     @discardableResult
     private func read() -> Bool {
-        guard let element, let focused = FocusedApp.focusedElement, CFEqual(focused, element),
-              let value = FocusedApp.text(of: element),
+        guard let element else { return false }
+        guard let focused = FocusedApp.focusedElement, CFEqual(focused, element) else { return true }
+        guard let value = FocusedApp.text(of: element),
               let region = Self.region(in: value, between: before, and: after)
         else { return false }
         edited = region
