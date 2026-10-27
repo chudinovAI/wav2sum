@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 
 RESERVED_TOKENS = 4096
 MAX_CHAPTERS = 8
+SNAP_SECONDS = 5
 
 ASR_NOTE_RU = """\
 Транскрипт получен автоматическим распознаванием речи и содержит ошибки: слова, похожие по звучанию, \
@@ -183,10 +184,20 @@ def chapters(transcript: str, llm: LLM, language: str = RU) -> str:
     """Chapters from a timestamped transcript, in a call of their own without thinking: with the timestamps and
     a chapters section in the summary prompt, the summary's thinking looped on re-checking them."""
     prompts = PROMPTS[language]
-    starts = set(re.findall(r"^\[(\S+) – ", transcript, re.MULTILINE))
+    starts = {_seconds(t): t for t in re.findall(r"^\[(\S+) – ", transcript, re.MULTILINE)}
+    if not starts:
+        return ""
 
     def at_starts(reply: str) -> list[str]:
-        return [line for line in reply.splitlines() if line.startswith("- ") and line[2:].split(" ")[0] in starts]
+        # The model sometimes writes a time a second or two off; it is moved to the nearest utterance start.
+        lines = []
+        for line in reply.splitlines():
+            time, _, topic = line.removeprefix("- ").partition(" ")
+            if line.startswith("- ") and re.fullmatch(r"(\d+:)?\d+:\d\d", time):
+                nearest = min(starts, key=lambda start: abs(start - _seconds(time)))
+                if abs(nearest - _seconds(time)) <= SNAP_SECONDS:
+                    lines.append(f"- {starts[nearest]} {topic}")
+        return lines
 
     lines = []
     try:
@@ -199,6 +210,10 @@ def chapters(transcript: str, llm: LLM, language: str = RU) -> str:
         logger.warning("No chapters: %s", e)
         return ""
     return f"**{prompts.chapters_title}**\n" + "\n".join(lines) if lines else ""
+
+
+def _seconds(clock: str) -> int:
+    return sum(int(part) * 60**i for i, part in enumerate(reversed(clock.split(":"))))
 
 
 def chunk_transcript(transcript: str, max_tokens: int, count_tokens: Callable[[str], int]) -> list[str]:

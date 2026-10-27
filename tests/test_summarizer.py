@@ -103,8 +103,8 @@ class ChaptersLLM(FakeLLM):
 TRANSCRIPT = "[00:01 – 00:04] Я: Привет\n\n[01:25 – 01:30] Илья: Про GPU\n\n[1:02:03 – 1:02:09] Я: Пока"
 
 
-def test_chapters_keep_only_lines_at_utterance_starts_and_run_without_thinking():
-    llm = ChaptersLLM("Вот главы:\n- \n- 00:01 — Знакомство\n- 00:30 — Выдумка\n- 01:25 — GPU\n- 1:02:03 — Прощание")
+def test_chapters_snap_to_utterance_starts_and_run_without_thinking():
+    llm = ChaptersLLM("Вот главы:\n- \n- 00:00 — Знакомство\n- 00:30 — Выдумка\n- 01:27 — GPU\n- 1:02:03 — Прощание")
     assert chapters(TRANSCRIPT, llm) == "**Главы**\n- 00:01 — Знакомство\n- 01:25 — GPU\n- 1:02:03 — Прощание"
     [(system, user, max_growth, think)] = llm.calls
     assert system.startswith("Тебе дан транскрипт созвона с таймкодами")
@@ -120,7 +120,8 @@ def test_english_chapters_get_an_english_prompt_and_title():
 
 
 def test_no_chapters_without_a_valid_line_or_when_the_reply_runs_away():
-    assert chapters(TRANSCRIPT, ChaptersLLM("- 00:30 — Выдумка")) == ""
+    assert chapters(TRANSCRIPT, ChaptersLLM("- 00:30 — Выдумка\n- 00:07 — Тоже мимо")) == ""
+    assert chapters("", ChaptersLLM("- 00:00 — Начало")) == ""
 
     class Looping(ChaptersLLM):
         def chat(self, *args, **kwargs):
