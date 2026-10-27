@@ -39,6 +39,9 @@ class LLM:
                 future.add_done_callback(_log_failure)
             raise
 
+    def count_tokens(self, text: str) -> int:
+        return _worker.submit(lambda: len(_load(self.model)[1].encode(text))).result()
+
     def unload(self) -> None:
         _worker.submit(_unload, self.model).result()
 

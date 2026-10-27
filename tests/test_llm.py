@@ -17,6 +17,10 @@ class FakeTokenizer:
         assert add_generation_prompt
         return {"messages": messages, "thinking": enable_thinking}
 
+    def encode(self, text):
+        self.thread = threading.current_thread().name
+        return text.split()
+
 
 class FakeMLX:
     """Stands in for mlx_lm and mlx: records loads and generations."""
@@ -111,6 +115,14 @@ def test_chat_sends_system_examples_and_options_and_drops_the_thinking(mlx):
         ("user", "привет"),
     ]
     assert (call["prompt"]["thinking"], call["max_tokens"], call["temp"]) == (False, 4096, 0.2)
+
+
+def test_tokens_are_counted_by_the_model_tokenizer_in_the_llm_thread(mlx):
+    llm = LLM("gemma")
+    assert llm.count_tokens("раз два три") == 3
+    llm.chat("s", "u")
+    assert mlx.loads == ["gemma"]
+    assert llm_module._loaded["gemma"][1].thread.startswith("llm")
 
 
 def test_think_turns_on_thinking(mlx):

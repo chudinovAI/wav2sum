@@ -37,7 +37,7 @@ class Config:
     them: str = "Собеседник"
     language: str = AUTO
     model: str = "mlx-community/gemma-4-12B-it-qat-4bit"
-    num_ctx: int = 16384
+    num_ctx: int = 32768
     mic: str | None = None
     recordings_dir: Path = Path("~/wav2sum/recordings")
     output_dir: Path = Path("~/wav2sum/output")
