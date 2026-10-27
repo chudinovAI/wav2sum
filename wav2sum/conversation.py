@@ -71,10 +71,8 @@ def build_conversation(utterances: list[Utterance], max_gap_sec: float = 2.0) ->
     return merged
 
 
-def format_transcript(utterances: list[Utterance], timestamps: bool = True) -> str:
-    return "\n\n".join(
-        (f"[{_clock(u.start)} – {_clock(u.end)}] " if timestamps else "") + f"{u.speaker}: {u.text}" for u in utterances
-    )
+def format_transcript(utterances: list[Utterance]) -> str:
+    return "\n\n".join(f"[{_clock(u.start)} – {_clock(u.end)}] {u.speaker}: {u.text}" for u in utterances)
 
 
 def _nearest_speaker(t: float, turns: list[Turn]) -> int | None:

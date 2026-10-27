@@ -119,7 +119,7 @@ def test_call_is_transcribed_summarized_and_written(tmp_path, monkeypatch):
 
     [(system, user)] = llm.requests
     assert "GigaAM, GitHub" in system
-    assert user.endswith("Андрей: привет GitHub\n\nИлья: здравствуй")
+    assert user.endswith("[00:00 – 00:02] Андрей: привет GitHub\n\n[00:03 – 00:05] Илья: здравствуй")
 
 
 def test_transcription_is_cached_until_settings_change(tmp_path, monkeypatch):

@@ -114,3 +114,21 @@ def test_dictation_shows_its_mode():
     assert "· chat" in tui._dictation_markdown(entry)
     assert "· command" in tui._dictation_markdown({**entry, "command": True})
     assert "· translate" in tui._dictation_markdown({**entry, "translate": True})
+
+
+def test_search_filters_calls_and_dictations(app):
+    async def scenario(pilot):
+        await pilot.press("slash", *"РЕЛИЗ")
+        assert len(_rows(app, "calls")) == 1
+        assert _rows(app, "dictations") == []
+        await pilot.press(*["backspace"] * 5)
+        await pilot.press(*"привет")
+        assert len(_rows(app, "calls")) == 1
+        assert len(_rows(app, "dictations")) == 1
+        await pilot.press("x", "enter")
+        assert _rows(app, "calls") == _rows(app, "dictations") == []
+        assert app.focused.id == "calls"
+        await pilot.press("escape")
+        assert len(_rows(app, "calls")) == len(_rows(app, "dictations")) == 1
+
+    _run(app, scenario)

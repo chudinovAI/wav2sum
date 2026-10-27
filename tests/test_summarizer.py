@@ -1,5 +1,5 @@
 from wav2sum.llm import LLM
-from wav2sum.summarizer import chunk_transcript, summarize
+from wav2sum.summarizer import PROMPTS, chunk_transcript, summarize
 
 
 class FakeLLM(LLM):
@@ -87,3 +87,11 @@ def test_chunks_fit_the_token_budget():
     chunks = chunk_transcript("\n\n".join(utterances), 40, lambda text: len(text.split()))
     assert len(chunks) > 1
     assert all(len(c.split()) <= 40 for c in chunks)
+
+
+def test_summary_ends_with_chapters_and_part_notes_keep_topic_timestamps():
+    ru, en = PROMPTS["ru"], PROMPTS["en"]
+    assert ru.summary.split("\n\nПравила:")[0].split("\n")[-1].startswith("**Главы** — не больше 8 глав")
+    assert en.summary.split("\n\nRules:")[0].split("\n")[-1].startswith("**Chapters** — at most 8 chapters")
+    assert "- смены темы: таймкод реплики, с которой началась тема" in ru.chunk
+    assert "- topic changes: the timestamp of the utterance where a topic begins" in en.chunk
