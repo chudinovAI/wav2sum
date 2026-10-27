@@ -1,4 +1,5 @@
 import logging
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
@@ -8,6 +9,8 @@ from wav2sum.llm import LLM
 logger = logging.getLogger(__name__)
 
 RESERVED_TOKENS = 4096
+MAX_CHAPTERS = 8
+SNAP_SECONDS = 5
 
 ASR_NOTE_RU = """\
 Транскрипт получен автоматическим распознаванием речи и содержит ошибки: слова, похожие по звучанию, \
@@ -27,8 +30,6 @@ SUMMARY_PROMPT_RU = f"""\
 **Решения** — что конкретно решили.
 **Задачи** — только то, о чём договорились: исполнитель (имя из разметки), что сделать, срок, если назван.
 **Открытые вопросы** — что осталось нерешённым.
-**Главы** — не больше 8 глав по ходу разговора, каждая строкой «- мм:сс — о чём». Время начала бери из таймкода \
-реплики, с которой началась тема; если тема одна, одна строка.
 
 Правила:
 - Пиши только то, что прямо сказано в разговоре. Не додумывай причины, последствия и детали.
@@ -48,8 +49,7 @@ CHUNK_PROMPT_RU = f"""\
 - обсуждаемые темы и позиции участников;
 - принятые решения;
 - задачи, договорённости и дедлайны (кто и что);
-- открытые вопросы;
-- смены темы: таймкод реплики, с которой началась тема, и о чём она.
+- открытые вопросы.
 Пропускай пункты, которых во фрагменте нет. Сохраняй имена спикеров. Числа, даты и имена бери только из \
 фрагмента, ничего не додумывай.\
 """
@@ -72,8 +72,6 @@ Format: exactly these sections, in this order:
 **Decisions** — what was actually decided.
 **Action items** — only what was agreed: owner (name from the labels), what to do, deadline if one was named.
 **Open questions** — what was left unresolved.
-**Chapters** — at most 8 chapters in the order of the call, each as a line "- mm:ss — what it is about". Take the \
-start time from the timestamp of the utterance where the topic begins; if there is one topic, give one line.
 
 Rules:
 - Write only what was actually said. Don't make up reasons, consequences or details.
@@ -93,10 +91,38 @@ List from this part, as bullet points in English:
 - topics discussed and each side's position;
 - decisions made;
 - action items, agreements and deadlines (who does what);
-- open questions;
-- topic changes: the timestamp of the utterance where a topic begins, and what it is about.
+- open questions.
 Skip points this part doesn't have. Keep speaker names. Take numbers, dates and names only from this part; \
 don't make anything up.\
+"""
+
+
+CHAPTERS_PROMPT_RU = f"""\
+Тебе дан транскрипт созвона с таймкодами реплик.
+Раздели разговор на главы по темам, по порядку, не больше {MAX_CHAPTERS}. Первая глава начинается с первой реплики, \
+новая — там, где разговор переходит к другой теме.
+Ответ — только строки глав, каждая вида «- мм:сс — тема в нескольких словах», где мм:сс — таймкод начала первой \
+реплики главы, скопированный из транскрипта. Без вступления и пояснений.\
+"""
+
+CHAPTERS_PROMPT_EN = f"""\
+You are given a call transcript with timestamps on each utterance.
+Split the conversation into chapters by topic, in order, at most {MAX_CHAPTERS}. The first chapter starts at the \
+first utterance, and a new one where the conversation moves on to another topic.
+Reply with chapter lines only, each as "- mm:ss — the topic in a few words", where mm:ss is the start timestamp of \
+the chapter's first utterance, copied from the transcript. No intro and no comments.\
+"""
+
+MERGE_CHAPTERS_PROMPT_RU = f"""\
+Тебе дан список глав созвона, по строке «- мм:сс — тема». Глав слишком много. Объедини соседние главы с близкими \
+темами так, чтобы осталось не больше {MAX_CHAPTERS}. У объединённой главы время её первой строки, тема — общая для \
+объединённых. Ответ — только строки глав в том же формате, без вступления и пояснений.\
+"""
+
+MERGE_CHAPTERS_PROMPT_EN = f"""\
+You are given a list of a call's chapters, one "- mm:ss — topic" line each. There are too many. Merge neighbouring \
+chapters with related topics so that at most {MAX_CHAPTERS} remain. A merged chapter takes the time of its first line \
+and a topic that covers the merged ones. Reply with chapter lines only, in the same format, no intro and no comments.\
 """
 
 
@@ -108,6 +134,9 @@ class Prompts:
     transcript: str
     notes: str
     part: str
+    chapters: str
+    merge_chapters: str
+    chapters_title: str
 
 
 PROMPTS = {
@@ -118,6 +147,9 @@ PROMPTS = {
         "Транскрипт созвона",
         "Заметки по частям созвона",
         "Часть",
+        CHAPTERS_PROMPT_RU,
+        MERGE_CHAPTERS_PROMPT_RU,
+        "Главы",
     ),
     EN: Prompts(
         SUMMARY_PROMPT_EN,
@@ -126,6 +158,9 @@ PROMPTS = {
         "Call transcript",
         "Notes on parts of the call",
         "Part",
+        CHAPTERS_PROMPT_EN,
+        MERGE_CHAPTERS_PROMPT_EN,
+        "Chapters",
     ),
 }
 
@@ -143,6 +178,42 @@ def summarize(transcript: str, llm: LLM, terms: Sequence[str] = (), language: st
     notes = [llm.chat(prompts.chunk + glossary, chunk) for chunk in chunks]
     joined = "\n\n".join(f"--- {prompts.part} {i} ---\n{n}" for i, n in enumerate(notes, 1))
     return llm.chat(prompts.summary + glossary, f"{prompts.notes}:\n\n{joined}")
+
+
+def chapters(transcript: str, llm: LLM, language: str = RU) -> str:
+    """Chapters from a timestamped transcript, in a call of their own without thinking: with the timestamps and
+    a chapters section in the summary prompt, the summary's thinking looped on re-checking them."""
+    prompts = PROMPTS[language]
+    starts = {_seconds(t): t for t in re.findall(r"^\[(\S+) – ", transcript, re.MULTILINE)}
+    if not starts:
+        return ""
+
+    def at_starts(reply: str) -> list[str]:
+        # The model sometimes writes a time a second or two off; it is moved to the nearest utterance start.
+        lines = []
+        for line in reply.splitlines():
+            time, _, topic = line.removeprefix("- ").partition(" ")
+            if line.startswith("- ") and re.fullmatch(r"(\d+:)?\d+:\d\d", time):
+                nearest = min(starts, key=lambda start: abs(start - _seconds(time)))
+                if abs(nearest - _seconds(time)) <= SNAP_SECONDS:
+                    lines.append(f"- {starts[nearest]} {topic}")
+        return lines
+
+    lines = []
+    try:
+        for chunk in chunk_transcript(transcript, (llm.num_ctx - RESERVED_TOKENS) * 2 // 3, llm.count_tokens):
+            lines += at_starts(llm.chat(prompts.chapters, chunk, max_growth=0.2, think=False))
+        if len(lines) > MAX_CHAPTERS:
+            # The model doesn't keep to the limit, and a long call gets up to that many from each part.
+            lines = at_starts(llm.chat(prompts.merge_chapters, "\n".join(lines), max_growth=1, think=False)) or lines
+    except ValueError as e:
+        logger.warning("No chapters: %s", e)
+        return ""
+    return f"**{prompts.chapters_title}**\n" + "\n".join(lines) if lines else ""
+
+
+def _seconds(clock: str) -> int:
+    return sum(int(part) * 60**i for i, part in enumerate(reversed(clock.split(":"))))
 
 
 def chunk_transcript(transcript: str, max_tokens: int, count_tokens: Callable[[str], int]) -> list[str]:

@@ -37,9 +37,9 @@ class FakeLLM(LLM):
         super().__init__("fake-model")
         self.requests: list[tuple[str, str]] = []
 
-    def chat(self, system, user, examples=()):
+    def chat(self, system, user, examples=(), max_growth=None, think=None):
         self.requests.append((system, user))
-        return "**Тема** — проверка."
+        return "- 00:03 — Приветствие" if think is False else "**Тема** — проверка."
 
     def count_tokens(self, text):
         return len(text.split())
@@ -104,7 +104,7 @@ def test_call_is_transcribed_summarized_and_written(tmp_path, monkeypatch):
     assert (
         out / "transcript.txt"
     ).read_text() == "[00:00 – 00:02] Андрей: привет GitHub\n\n[00:03 – 00:05] Илья: здравствуй"
-    assert (out / "summary.md").read_text() == "**Тема** — проверка."
+    assert (out / "summary.md").read_text() == "**Тема** — проверка.\n\n**Главы**\n- 00:03 — Приветствие"
     meta = json.loads((out / "meta.json").read_text())
     assert meta | {"timings": None} == {
         "audio": str(audio.resolve()),
@@ -117,9 +117,10 @@ def test_call_is_transcribed_summarized_and_written(tmp_path, monkeypatch):
     }
     assert set(meta["timings"]) == {"transcription", "summarization"}
 
-    [(system, user)] = llm.requests
+    [(system, user), (_, chapters_user)] = llm.requests
     assert "GigaAM, GitHub" in system
-    assert user.endswith("[00:00 – 00:02] Андрей: привет GitHub\n\n[00:03 – 00:05] Илья: здравствуй")
+    assert user.endswith("Андрей: привет GitHub\n\nИлья: здравствуй")
+    assert chapters_user == "[00:00 – 00:02] Андрей: привет GitHub\n\n[00:03 – 00:05] Илья: здравствуй"
 
 
 def test_transcription_is_cached_until_settings_change(tmp_path, monkeypatch):

@@ -14,7 +14,7 @@ from wav2sum.echo import suppress_echo
 from wav2sum.language import RU
 from wav2sum.llm import LLM
 from wav2sum.models import Models
-from wav2sum.summarizer import summarize
+from wav2sum.summarizer import chapters, summarize
 from wav2sum.vocabulary import Vocabulary
 
 logger = logging.getLogger(__name__)
@@ -126,7 +126,9 @@ def process(
         on_stage("Summarizing")
         started = time.monotonic()
         terms = list(dict.fromkeys([*dictionary, *vocabulary.words]))
-        summary = summarize(format_transcript(conversation), llm, terms, language)
+        summary = summarize(format_transcript(conversation, timestamps=False), llm, terms, language)
+        if chapter_lines := chapters(format_transcript(conversation), llm, language):
+            summary += "\n\n" + chapter_lines
         timings["summarization"] = time.monotonic() - started
 
     duration = len(audio) / SAMPLE_RATE

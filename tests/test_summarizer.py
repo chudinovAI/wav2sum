@@ -1,5 +1,5 @@
 from wav2sum.llm import LLM
-from wav2sum.summarizer import PROMPTS, chunk_transcript, summarize
+from wav2sum.summarizer import chapters, chunk_transcript, summarize
 
 
 class FakeLLM(LLM):
@@ -89,9 +89,66 @@ def test_chunks_fit_the_token_budget():
     assert all(len(c.split()) <= 40 for c in chunks)
 
 
-def test_summary_ends_with_chapters_and_part_notes_keep_topic_timestamps():
-    ru, en = PROMPTS["ru"], PROMPTS["en"]
-    assert ru.summary.split("\n\nПравила:")[0].split("\n")[-1].startswith("**Главы** — не больше 8 глав")
-    assert en.summary.split("\n\nRules:")[0].split("\n")[-1].startswith("**Chapters** — at most 8 chapters")
-    assert "- смены темы: таймкод реплики, с которой началась тема" in ru.chunk
-    assert "- topic changes: the timestamp of the utterance where a topic begins" in en.chunk
+class ChaptersLLM(FakeLLM):
+    def __init__(self, reply, num_ctx=16384):
+        super().__init__(num_ctx)
+        self.reply = reply
+        self.calls = []
+
+    def chat(self, system, user, examples=(), max_growth=None, think=None):
+        self.calls.append((system, user, max_growth, think))
+        return self.reply
+
+
+TRANSCRIPT = "[00:01 – 00:04] Я: Привет\n\n[01:25 – 01:30] Илья: Про GPU\n\n[1:02:03 – 1:02:09] Я: Пока"
+
+
+def test_chapters_snap_to_utterance_starts_and_run_without_thinking():
+    llm = ChaptersLLM("Вот главы:\n- \n- 00:00 — Знакомство\n- 00:30 — Выдумка\n- 01:27 — GPU\n- 1:02:03 — Прощание")
+    assert chapters(TRANSCRIPT, llm) == "**Главы**\n- 00:01 — Знакомство\n- 01:25 — GPU\n- 1:02:03 — Прощание"
+    [(system, user, max_growth, think)] = llm.calls
+    assert system.startswith("Тебе дан транскрипт созвона с таймкодами")
+    assert user == TRANSCRIPT
+    assert think is False
+    assert max_growth is not None
+
+
+def test_english_chapters_get_an_english_prompt_and_title():
+    llm = ChaptersLLM("- 00:01 — Intro")
+    assert chapters(TRANSCRIPT, llm, language="en") == "**Chapters**\n- 00:01 — Intro"
+    assert llm.calls[0][0].startswith("You are given a call transcript with timestamps")
+
+
+def test_no_chapters_without_a_valid_line_or_when_the_reply_runs_away():
+    assert chapters(TRANSCRIPT, ChaptersLLM("- 00:30 — Выдумка\n- 00:07 — Тоже мимо")) == ""
+    assert chapters("", ChaptersLLM("- 00:00 — Начало")) == ""
+
+    class Looping(ChaptersLLM):
+        def chat(self, *args, **kwargs):
+            raise ValueError("LLM reply hit the 100-token limit")
+
+    assert chapters(TRANSCRIPT, Looping("")) == ""
+
+
+def test_a_long_call_gets_chapters_from_each_part():
+    transcript = "\n\n".join(f"[{i:02d}:00 – {i:02d}:30] Я: " + "слово " * 30 for i in range(10))
+    llm = ChaptersLLM("- 00:00 — Начало", num_ctx=4096 + 150)
+    assert chapters(transcript, llm) == "**Главы**\n" + "\n".join(["- 00:00 — Начало"] * len(llm.calls))
+    assert 1 < len(llm.calls) <= 8
+    assert "\n\n".join(user for _, user, _, _ in llm.calls) == transcript
+
+
+def test_more_than_8_chapters_are_merged_in_one_more_call():
+    transcript = "\n\n".join(f"[{i:02d}:00 – {i:02d}:30] Я: тема {i}" for i in range(12))
+
+    class Merging(ChaptersLLM):
+        def chat(self, system, user, examples=(), max_growth=None, think=None):
+            self.calls.append((system, user, max_growth, think))
+            if "Объедини" in system:
+                return "- 00:00 — Первая половина\n- 06:00 — Вторая половина"
+            return "\n".join(f"- {i:02d}:00 — Тема {i}" for i in range(12))
+
+    llm = Merging("")
+    assert chapters(transcript, llm) == "**Главы**\n- 00:00 — Первая половина\n- 06:00 — Вторая половина"
+    assert llm.calls[1][1] == "\n".join(f"- {i:02d}:00 — Тема {i}" for i in range(12))
+    assert llm.calls[1][3] is False

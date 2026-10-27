@@ -39,11 +39,14 @@ class LLM:
         system: str,
         user: str,
         examples: list[tuple[str, str]] = (),
+        *,
         max_growth: float | None = None,
         lookup: bool = False,
+        think: bool | None = None,
     ) -> str:
         """max_growth caps the reply at that many times the input's tokens, so a looping model stops early.
-        lookup drafts the reply from the prompt and checks several tokens a pass: faster for a reply that copies it."""
+        lookup drafts the reply from the prompt and checks several tokens a pass: faster for a reply that copies it.
+        think overrides self.think for this call."""
         logger.debug("→ %s: %d chars", self.model, len(user))
         shots = [
             {"role": role, "content": text}
@@ -52,10 +55,10 @@ class LLM:
         ]
         messages = [{"role": "system", "content": system}, *shots, {"role": "user", "content": user}]
         if self.timeout is None:
-            future = _worker.submit(self._generate, messages, max_growth, lookup)
+            future = _worker.submit(self._generate, messages, max_growth, lookup, think)
         else:
             future = Future()
-            _urgent.put((future, partial(self._generate, messages, max_growth, lookup)))
+            _urgent.put((future, partial(self._generate, messages, max_growth, lookup, think)))
             _worker.submit(_run_urgent)
         try:
             return future.result(self.timeout)
@@ -72,24 +75,21 @@ class LLM:
     def unload(self) -> None:
         _worker.submit(_unload, self.model).result()
 
-    def _generate(self, messages: list[dict], max_growth: float | None, lookup: bool) -> str:
+    def _generate(self, messages: list[dict], max_growth: float | None, lookup: bool, think: bool | None) -> str:
         from mlx_lm import stream_generate
         from mlx_lm.sample_utils import make_sampler
 
         if timer := _timers.pop(self.model, None):
             timer.cancel()
         model, tokenizer = _load(self.model)
-        prompt = whole = tokenizer.apply_chat_template(
-            messages, add_generation_prompt=True, enable_thinking=bool(self.think)
-        )
+        thinking = bool(self.think if think is None else think)
+        prompt = whole = tokenizer.apply_chat_template(messages, add_generation_prompt=True, enable_thinking=thinking)
         limit = self.num_ctx
         if max_growth is not None:
             limit = min(limit, int(max_growth * len(tokenizer.encode(messages[-1]["content"]))) + 64)
         cache = None
         if self.cache_prefix:
-            prefix = tokenizer.apply_chat_template(
-                messages[:-1], add_generation_prompt=False, enable_thinking=bool(self.think)
-            )
+            prefix = tokenizer.apply_chat_template(messages[:-1], add_generation_prompt=False, enable_thinking=thinking)
             if prompt[: len(prefix)] == prefix:
                 # Generation writes into the cache, so it gets a copy and the saved prefix stays clean.
                 cache = copy.deepcopy(_prefix_cache(self.model, model, tuple(prefix)))
