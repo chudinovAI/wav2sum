@@ -58,6 +58,7 @@ class CallRecorder:
         if self._error or not self.started_at:
             self._proc.kill()
             raise CaptureError(self._error or "wav2sum-capture did not start")
+        self._write_sidecar()
 
     def wait(self) -> None:
         self._proc.wait()
@@ -73,16 +74,19 @@ class CallRecorder:
         if self._error or self._proc.returncode != 0 or not self.path.exists():
             raise CaptureError(self._error or f"wav2sum-capture exited with code {self._proc.returncode}")
 
+        self._write_sidecar(duration_sec=round(self.seconds, 1))
+        self._warn_if_silent()
+        return self.path
+
+    def _write_sidecar(self, **extra) -> None:
         sidecar = {
             "layout": "call",
             "channels": ["mic", "system"],
             "mic": self.mic_name,
             "started_at": self.started_at.isoformat(timespec="seconds"),
-            "duration_sec": round(self.seconds, 1),
+            **extra,
         }
         self.path.with_suffix(".json").write_text(json.dumps(sidecar, ensure_ascii=False, indent=2), encoding="utf-8")
-        self._warn_if_silent()
-        return self.path
 
     def _read_events(self) -> None:
         try:

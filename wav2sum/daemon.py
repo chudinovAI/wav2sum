@@ -88,6 +88,7 @@ class Daemon:
             self.loop.add_signal_handler(sig, self.stopping.set)
         logger.info("wav2sum %s daemon on %s (pid %d)", __version__, SOCKET_PATH, os.getpid())
 
+        self._enqueue_unprocessed()
         tasks = [asyncio.create_task(self._warm_up()), asyncio.create_task(self._work())]
         if self.cfg.auto_record:
             tasks.append(asyncio.create_task(self._watch_calls()))
@@ -309,6 +310,12 @@ class Daemon:
         self.queue.put_nowait(job)
         self._broadcast({"event": "job", **asdict(job)})
         return job
+
+    def _enqueue_unprocessed(self) -> None:
+        """Queues recordings left without a result by a crash or a restart."""
+        for audio in sorted(self.cfg.recordings_dir.glob("*.wav")):
+            if not (self.cfg.output_dir / audio.stem).exists():
+                self._enqueue(audio)
 
     async def _work(self) -> None:
         while True:

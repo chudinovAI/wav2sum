@@ -52,8 +52,10 @@ def test_recording_writes_audio_and_sidecar(tmp_path, helper):
     recorder = CallRecorder(tmp_path / "recordings" / "call.wav", on_level=levels.append)
 
     recorder.start()
+    started = json.loads(recorder.path.with_suffix(".json").read_text())
     wav = recorder.stop()
 
+    assert started["layout"] == "call" and "duration_sec" not in started
     assert wav.read_bytes() == b"RIFF"
     sidecar = json.loads(wav.with_suffix(".json").read_text())
     assert sidecar | {"started_at": None} == {
