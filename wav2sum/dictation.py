@@ -305,7 +305,7 @@ class Dictator:
                     self._prompt("cleanup", style, markers=bool(snippets), language=language),
                     marked,
                     PROMPTS[language].examples,
-                    MAX_GROWTH,
+                    max_growth=MAX_GROWTH,
                     lookup=True,
                 )
             except Exception as e:
@@ -323,7 +323,7 @@ class Dictator:
         # and the app beeps on the error.
         marked, snippets = mark_snippets(raw, self.cfg.snippets)
         text = self.llm.chat(
-            self._prompt("translate", style, markers=bool(snippets)), marked, TRANSLATE_EXAMPLES, MAX_GROWTH
+            self._prompt("translate", style, markers=bool(snippets)), marked, TRANSLATE_EXAMPLES, max_growth=MAX_GROWTH
         )
         if not text or len(text) > MAX_GROWTH * len(marked) + 40:
             raise ValueError(f"translation rejected ({len(marked)} → {len(text)} chars)")
