@@ -27,7 +27,10 @@ class LLM:
     timeout: float | None = None
     cache_prefix: bool = False  # keep the KV cache of all but the last message while the weights are loaded
 
-    def chat(self, system: str, user: str, examples: list[tuple[str, str]] = ()) -> str:
+    def chat(
+        self, system: str, user: str, examples: list[tuple[str, str]] = (), max_growth: float | None = None
+    ) -> str:
+        """max_growth caps the reply at that many times the input's tokens, so a looping model stops early."""
         logger.debug("→ %s: %d chars", self.model, len(user))
         shots = [
             {"role": role, "content": text}
@@ -35,16 +38,20 @@ class LLM:
             for role, text in zip(("user", "assistant"), pair, strict=True)
         ]
         messages = [{"role": "system", "content": system}, *shots, {"role": "user", "content": user}]
-        future = _worker.submit(self._generate, messages)
+        future = _worker.submit(self._generate, messages, max_growth)
         try:
             return future.result(self.timeout)
-        finally:
-            future.cancel()  # a dictation that gave up waiting behind a summary must not run later
+        except TimeoutError:
+            # A dictation that gave up waiting behind a summary must not run later; one already running
+            # (say, a slow first download) finishes with nobody waiting, so its failure goes to the log.
+            if not future.cancel():
+                future.add_done_callback(_log_failure)
+            raise
 
     def unload(self) -> None:
         _worker.submit(_unload, self.model).result()
 
-    def _generate(self, messages: list[dict]) -> str:
+    def _generate(self, messages: list[dict], max_growth: float | None) -> str:
         from mlx_lm import generate
         from mlx_lm.sample_utils import make_sampler
 
@@ -52,6 +59,9 @@ class LLM:
             timer.cancel()
         model, tokenizer = _load(self.model)
         prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=True, enable_thinking=bool(self.think))
+        limit = self.num_ctx
+        if max_growth is not None:
+            limit = min(limit, int(max_growth * len(tokenizer.encode(messages[-1]["content"]))) + 64)
         cache = None
         if self.cache_prefix:
             prefix = tokenizer.apply_chat_template(
@@ -67,7 +77,7 @@ class LLM:
             model,
             tokenizer,
             prompt,
-            max_tokens=self.num_ctx,
+            max_tokens=limit,
             sampler=make_sampler(self.temperature),
             prompt_cache=cache,
         )
@@ -75,9 +85,16 @@ class LLM:
             _timers[self.model] = timer = threading.Timer(self.keep_alive, lambda: _worker.submit(_unload, self.model))
             timer.daemon = True
             timer.start()
+        if max_growth is not None and len(tokenizer.encode(text)) >= limit:
+            raise ValueError(f"LLM reply hit the {limit}-token limit")
         if tokenizer.has_thinking:
             text = text.rpartition(tokenizer.think_end)[2]
         return text.strip()
+
+
+def _log_failure(future) -> None:
+    if error := future.exception():
+        logger.error("LLM failed after the caller stopped waiting", exc_info=error)
 
 
 def memory_mb() -> int:

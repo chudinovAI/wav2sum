@@ -19,6 +19,9 @@ class FakeTokenizer:
         tokens = [(m["role"], m["content"]) for m in messages]
         return [*tokens, ("reply", enable_thinking)] if add_generation_prompt else tokens
 
+    def encode(self, text):
+        return text.split()
+
 
 class FakeCache:
     """The KV cache of one layer: remembers the tokens it has seen; 1 MB each."""
@@ -54,6 +57,8 @@ class FakeMLX:
     def __init__(self, reply="<|channel>thought долго думал<channel|>  ответ \n", seconds=0.0):
         self.reply, self.seconds = reply, seconds
         self.gate = None
+        self.error = None
+        self.looping = False
         self.loads, self.calls, self.models = [], [], []
         self.running = self.most_running = 0
 
@@ -68,13 +73,15 @@ class FakeMLX:
         time.sleep(self.seconds)
         if self.gate:
             self.gate.wait()
+        if self.error:
+            raise self.error
         self.calls.append(
             {"prompt": prompt, "max_tokens": max_tokens, "temp": sampler, "cache": copy.deepcopy(prompt_cache)}
         )
         if prompt_cache:
             prompt_cache[0].tokens += prompt
         self.running -= 1
-        return self.reply
+        return " ".join(["бла"] * max_tokens) if self.looping else self.reply
 
 
 TIMERS = []
@@ -151,6 +158,15 @@ def test_chat_sends_system_examples_and_options_and_drops_the_thinking(mlx):
     assert (call["prompt"][-1], call["max_tokens"], call["temp"], call["cache"]) == (("reply", False), 4096, 0.2, None)
 
 
+def test_reply_is_limited_by_the_input_length_and_a_runaway_raises(mlx):
+    llm = LLM("gemma", num_ctx=4096)
+    assert llm.chat("s", "раз два три четыре", max_growth=1.5) == "ответ"
+    mlx.looping = True
+    with pytest.raises(ValueError):
+        llm.chat("s", "раз два три четыре", max_growth=1.5)
+    assert [call["max_tokens"] for call in mlx.calls] == [70, 70]
+
+
 def test_think_turns_on_thinking(mlx):
     LLM("gemma", think=True).chat("s", "u")
     assert mlx.calls[0]["prompt"][-1] == ("reply", True)
@@ -219,6 +235,16 @@ def test_a_chat_that_waits_past_its_timeout_gives_up_and_never_runs(mlx):
     mlx.gate.set()
     summary.join()
     assert mlx.loads == ["big"]
+
+
+def test_a_failure_after_the_caller_gave_up_is_logged(mlx, caplog):
+    mlx.gate, mlx.error = threading.Event(), OSError("error decoding response body")
+    with pytest.raises(TimeoutError):
+        LLM("gemma", timeout=0.05).chat("s", "u")
+    mlx.gate.set()
+    llm_module._worker.submit(lambda: None).result()
+    assert "LLM failed after the caller stopped waiting" in caplog.text
+    assert "error decoding response body" in caplog.text
 
 
 EXAMPLES = [("ну э привет", "Привет.")]

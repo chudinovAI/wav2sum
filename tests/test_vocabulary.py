@@ -69,3 +69,10 @@ def test_apply_only_replaces_whole_words():
     vocabulary = Vocabulary()
     vocabulary.pairs = {"гит хаб": "GitHub"}
     assert vocabulary.apply("Гит хаб, гит хабу и мой гит хаб.") == "GitHub, гит хабу и мой GitHub."
+
+
+def test_apply_matches_abbreviations_exactly():
+    vocabulary = Vocabulary()
+    vocabulary.pairs = {"CD": "CI/CD", "jason": "JSON"}
+    assert vocabulary.apply("Настрой CD, потом cd в папку") == "Настрой CI/CD, потом cd в папку"
+    assert vocabulary.apply("Jason и jason") == "JSON и JSON"
