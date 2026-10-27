@@ -1,14 +1,18 @@
 import copy
 import gc
 import logging
+import queue
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+from functools import partial
 
 logger = logging.getLogger(__name__)
 
 # One thread runs every generation: MLX streams are per thread, and the GPU runs one model at a time anyway.
 _worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="llm")
+# Dictations (chats with a timeout) wait here too, so a summary runs them between its tokens.
+_urgent: queue.SimpleQueue = queue.SimpleQueue()
 _loaded: dict[str, tuple] = {}
 _timers: dict[str, threading.Timer] = {}
 # Dictation reruns the same system prompt and examples each time; their KV cache saves that prefill.
@@ -38,7 +42,12 @@ class LLM:
             for role, text in zip(("user", "assistant"), pair, strict=True)
         ]
         messages = [{"role": "system", "content": system}, *shots, {"role": "user", "content": user}]
-        future = _worker.submit(self._generate, messages, max_growth)
+        if self.timeout is None:
+            future = _worker.submit(self._generate, messages, max_growth)
+        else:
+            future = Future()
+            _urgent.put((future, partial(self._generate, messages, max_growth)))
+            _worker.submit(_run_urgent)
         try:
             return future.result(self.timeout)
         except TimeoutError:
@@ -55,7 +64,7 @@ class LLM:
         _worker.submit(_unload, self.model).result()
 
     def _generate(self, messages: list[dict], max_growth: float | None) -> str:
-        from mlx_lm import generate
+        from mlx_lm import stream_generate
         from mlx_lm.sample_utils import make_sampler
 
         if timer := _timers.pop(self.model, None):
@@ -76,15 +85,25 @@ class LLM:
                 prompt = prompt[len(prefix) :]
             else:
                 logger.debug("The chat template renders the prefix differently; running the whole prompt")
-        text = generate(
+        # A summary lets waiting dictations run between its prefill chunks and tokens; dictations wait their turn.
+        yield_to_urgent = (lambda *_: _run_urgent()) if self.timeout is None else None
+        text = ""
+        for response in stream_generate(
             model,
             tokenizer,
             prompt,
             max_tokens=limit,
             sampler=make_sampler(self.temperature),
             prompt_cache=cache,
-        )
+            prompt_progress_callback=yield_to_urgent,
+        ):
+            text += response.text
+            if yield_to_urgent:
+                yield_to_urgent()
         if self.keep_alive is not None:
+            # A dictation on the same model, run in the middle of this summary, has set its own timer.
+            if timer := _timers.pop(self.model, None):
+                timer.cancel()
             _timers[self.model] = timer = threading.Timer(self.keep_alive, lambda: _worker.submit(_unload, self.model))
             timer.daemon = True
             timer.start()
@@ -93,6 +112,16 @@ class LLM:
         if tokenizer.has_thinking:
             text = text.rpartition(tokenizer.think_end)[2]
         return text.strip()
+
+
+def _run_urgent() -> None:
+    while not _urgent.empty():
+        future, generate = _urgent.get()
+        if future.set_running_or_notify_cancel():
+            try:
+                future.set_result(generate())
+            except Exception as e:
+                future.set_exception(e)
 
 
 def _log_failure(future) -> None:

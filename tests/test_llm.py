@@ -40,7 +40,8 @@ class FakeCache:
 
 
 class FakeModel:
-    def __init__(self):
+    def __init__(self, name):
+        self.name = name
         self.prefills = []
 
     def parameters(self):
@@ -64,15 +65,18 @@ class FakeMLX:
         self.gate = None
         self.error = None
         self.looping = False
+        self.hold = None  # (model, "prefill" or "tokens", event): its next generation stalls there until the event
         self.loads, self.calls, self.models = [], [], []
         self.running = self.most_running = 0
 
     def load(self, name):
         self.loads.append(name)
-        self.models.append(FakeModel())
+        self.models.append(FakeModel(name))
         return self.models[-1], FakeTokenizer()
 
-    def generate(self, model, tokenizer, prompt, max_tokens, sampler, *, prompt_cache=None):
+    def stream_generate(
+        self, model, tokenizer, prompt, *, max_tokens, sampler, prompt_cache=None, prompt_progress_callback
+    ):
         self.running += 1
         self.most_running = max(self.most_running, self.running)
         time.sleep(self.seconds)
@@ -81,12 +85,28 @@ class FakeMLX:
         if self.error:
             raise self.error
         self.calls.append(
-            {"prompt": prompt, "max_tokens": max_tokens, "temp": sampler, "cache": copy.deepcopy(prompt_cache)}
+            {
+                "model": model.name,
+                "prompt": prompt,
+                "max_tokens": max_tokens,
+                "temp": sampler,
+                "cache": copy.deepcopy(prompt_cache),
+            }
         )
         if prompt_cache:
             prompt_cache[0].tokens += prompt
+        _, phase, event = self.hold if self.hold and self.hold[0] == model.name else (None, None, None)
+        self.hold = None if phase else self.hold
+        while phase == "prefill" and not event.is_set():
+            prompt_progress_callback(1, 2)
+            time.sleep(0.01)
+        reply = " ".join(["бла"] * max_tokens) if self.looping else self.reply
+        for i, char in enumerate(reply):
+            while phase == "tokens" and i == 1 and not event.is_set():
+                yield SimpleNamespace(text="")
+                time.sleep(0.01)
+            yield SimpleNamespace(text=char)
         self.running -= 1
-        return " ".join(["бла"] * max_tokens) if self.looping else self.reply
 
 
 TIMERS = []
@@ -118,7 +138,7 @@ def mlx(monkeypatch):
     TIMERS.clear()
     monkeypatch.setattr(llm_module.threading, "Timer", FakeTimer)
     mlx_lm = ModuleType("mlx_lm")
-    mlx_lm.load, mlx_lm.generate = fake.load, fake.generate
+    mlx_lm.load, mlx_lm.stream_generate = fake.load, fake.stream_generate
     sample_utils = ModuleType("mlx_lm.sample_utils")
     sample_utils.make_sampler = lambda temp: temp
     models = ModuleType("mlx_lm.models")
@@ -258,6 +278,38 @@ def test_a_failure_after_the_caller_gave_up_is_logged(mlx, caplog):
     llm_module._worker.submit(lambda: None).result()
     assert "LLM failed after the caller stopped waiting" in caplog.text
     assert "error decoding response body" in caplog.text
+
+
+@pytest.mark.parametrize("phase", ["prefill", "tokens"])
+def test_a_dictation_during_a_long_summary_jumps_ahead_and_the_summary_finishes(mlx, phase):
+    event = threading.Event()
+    mlx.hold = ("big", phase, event)
+    summary = []
+    thread = threading.Thread(target=lambda: summary.append(LLM("big").chat("s", "u")))
+    thread.start()
+    while not mlx.calls:
+        time.sleep(0.01)
+    try:
+        assert LLM("small", timeout=1).chat("s", "u") == "ответ"
+        assert thread.is_alive()
+    finally:
+        event.set()
+        thread.join()
+    assert summary == ["ответ"]
+    assert [c["model"] for c in mlx.calls] == ["big", "small"]
+
+
+def test_a_dictation_inside_a_summary_on_the_same_model_leaves_one_idle_timer(mlx):
+    event = threading.Event()
+    mlx.hold = ("gemma", "tokens", event)
+    thread = threading.Thread(target=LLM("gemma", keep_alive=600).chat, args=("s", "u"))
+    thread.start()
+    while not mlx.calls:
+        time.sleep(0.01)
+    LLM("gemma", keep_alive=600, timeout=1).chat("s", "u")
+    event.set()
+    thread.join()
+    assert [t.cancelled for t in TIMERS] == [True, False]
 
 
 EXAMPLES = [("ну э привет", "Привет.")]
