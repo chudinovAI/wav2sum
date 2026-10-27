@@ -82,12 +82,16 @@ final class Microphone {
     private var samples: [Float] = []
     private var taken = 0
     private let lock = NSLock()
+    private var startedAt = Date()
+    private var waiting = (buffer: false, sound: false)
 
     func start() throws {
         lock.withLock {
             samples.removeAll(keepingCapacity: true)
             taken = 0
         }
+        startedAt = Date()
+        waiting = (true, true)
         // A long-lived engine keeps the input format it first saw; once the mic's sample rate
         // changes, installTap raises an Objective-C exception that `try` can't catch.
         engine = AVAudioEngine()
@@ -96,6 +100,7 @@ final class Microphone {
         guard format.sampleRate > 0, format.channelCount > 0 else {
             throw NSError(domain: "wav2sum", code: 1, userInfo: [NSLocalizedDescriptionKey: "no input device"])
         }
+        Log.write("microphone \(AVCaptureDevice.default(for: .audio)?.localizedName ?? "unknown") \(Int(format.sampleRate)) Hz")
         converter = AVAudioConverter(from: format, to: target)
         input.installTap(onBus: 0, bufferSize: 1600, format: format) { [weak self] buffer, _ in
             self?.consume(buffer)
@@ -132,6 +137,16 @@ final class Microphone {
         let chunk = UnsafeBufferPointer(start: out.floatChannelData![0], count: Int(out.frameLength))
         lock.withLock { samples.append(contentsOf: chunk) }
         let rms = sqrt(chunk.reduce(0) { $0 + $1 * $1 } / Float(max(chunk.count, 1)))
+        // CHU-129: how long the first word waits for the microphone, e.g. AirPods switching to headset mode.
+        let ms = Int(Date().timeIntervalSince(startedAt) * 1000)
+        if waiting.buffer {
+            waiting.buffer = false
+            Log.write("microphone first buffer after \(ms) ms")
+        }
+        if waiting.sound && rms > 0 {
+            waiting.sound = false
+            Log.write("microphone first sound after \(ms) ms")
+        }
         DispatchQueue.main.async { self.onLevel?(rms) }
     }
 }
