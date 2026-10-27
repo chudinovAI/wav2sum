@@ -1,5 +1,3 @@
-import signal
-
 import numpy as np
 
 from wav2sum import evalset
@@ -69,17 +67,15 @@ def test_record_skips_recorded_phrases_and_keeps_only_finished_files(tmp_path, m
     prompts, started = [], []
 
     class FakeProc:
-        def __init__(self, cmd):
+        def __init__(self, cmd, stdin):
             self.part = cmd[-1]
             started.append(cmd)
 
-        def send_signal(self, sig):
-            assert sig == signal.SIGINT
-
-        def wait(self):
+        def communicate(self, data):
+            assert data == b"q"
             with open(self.part, "w") as f:
                 f.write("new")
-            return 1 if len(started) == 2 else 0
+            self.returncode = 1 if len(started) == 2 else 0
 
     monkeypatch.setattr(evalset.subprocess, "Popen", FakeProc)
     monkeypatch.setattr("builtins.input", prompts.append)
