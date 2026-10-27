@@ -193,13 +193,13 @@ func appBundlePath(_ id: AudioObjectID) -> String? {
     return String(path[..<end.upperBound])
 }
 
-/// The process objects of the app with this bundle id and of all processes from its bundle.
-func appProcesses(_ bundleID: String) -> [AudioObjectID] {
+/// All process objects except the app with this bundle id and the processes from its bundle.
+func processesOutside(_ bundleID: String) -> [AudioObjectID] {
     let system = AudioObjectID(kAudioObjectSystemObject)
     guard let ids = try? readArray(system, kAudioHardwarePropertyProcessObjectList, of: AudioObjectID.self) else { return [] }
     let paths = ids.map { ($0, appBundlePath($0)) }
     let apps = Set(paths.filter { readString($0.0, kAudioProcessPropertyBundleID) == bundleID }.compactMap { $0.1 })
-    return paths.filter { $0.1.map(apps.contains) ?? false }.map { $0.0 }
+    return paths.filter { !($0.1.map(apps.contains) ?? false) }.map { $0.0 }
 }
 
 final class Recorder {
@@ -211,19 +211,17 @@ final class Recorder {
     private let sampleRate: Double
     private let tap: CATapDescription
     private let app: String?
-    private var processes: [AudioObjectID] = []
+    private var excluded: [AudioObjectID]
 
     /// With `app`, the system channel is only that app's sound; without it, all sound of the Mac.
+    /// A tap of only the app's processes does not tick until the app plays, and then the mic is lost too,
+    /// so this is a global tap that excludes all other processes.
     init(url: URL, mic: InputDevice, outRate: Double, app: String?) throws {
         self.mic = mic
         self.app = app
 
-        if let app {
-            processes = appProcesses(app)
-            tap = CATapDescription(stereoMixdownOfProcesses: processes)
-        } else {
-            tap = CATapDescription(stereoGlobalTapButExcludeProcesses: [])
-        }
+        excluded = app.map(processesOutside) ?? []
+        tap = CATapDescription(stereoGlobalTapButExcludeProcesses: excluded)
         tap.uuid = UUID()
         tap.name = "wav2sum system audio"
         tap.isPrivate = true
@@ -298,21 +296,21 @@ final class Recorder {
         }, "AudioDeviceCreateIOProcIDWithBlock")
 
         try check(AudioDeviceStart(aggregateID, ioProcID), "AudioDeviceStart")
-        emit(["event": "started", "mic": mic.name, "device_rate": sampleRate, "streams": streams, "processes": processes])
+        emit(["event": "started", "mic": mic.name, "device_rate": sampleRate, "streams": streams, "excluded": excluded.count])
     }
 
-    /// A call app starts its helpers during the call and can restart them; the tap follows the new processes.
+    /// Other apps start new processes during the call; the tap excludes them too.
     func followApp() throws {
         guard let app else { return }
-        let current = appProcesses(app)
-        guard current != processes else { return }
-        processes = current
+        let current = processesOutside(app)
+        guard current != excluded else { return }
+        excluded = current
         tap.processes = current
         var addr = address(kAudioTapPropertyDescription)
         var description = tap
         try check(AudioObjectSetPropertyData(tapID, &addr, 0, nil, UInt32(MemoryLayout<CATapDescription>.size), &description),
                   "update tap processes")
-        emit(["event": "processes", "processes": current])
+        emit(["event": "excluded", "excluded": current.count])
     }
 
     func flush() throws -> (Double, Double)? { try writer.flush() }
