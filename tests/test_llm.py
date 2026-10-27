@@ -12,6 +12,7 @@ from wav2sum.llm import LLM
 
 class FakeTokenizer:
     has_thinking = True
+    think_start = "<|channel>thought"
     think_end = "<channel|>"
 
     def apply_chat_template(self, messages, add_generation_prompt, enable_thinking):
@@ -80,6 +81,7 @@ class FakeMLX:
         self.gate = None
         self.error = None
         self.looping = False
+        self.replies = []  # replies for the next generations, before self.reply
         self.hold = None  # (model, "prefill" or "tokens", event): its next generation stalls there until the event
         self.loads, self.calls, self.models = [], [], []
         self.running = self.most_running = 0
@@ -115,7 +117,7 @@ class FakeMLX:
         while phase == "prefill" and not event.is_set():
             prompt_progress_callback(1, 2)
             time.sleep(0.01)
-        reply = " ".join(["бла"] * max_tokens) if self.looping else self.reply
+        reply = " ".join(["бла"] * max_tokens) if self.looping else self.replies.pop(0) if self.replies else self.reply
         for i, char in enumerate(reply):
             while phase == "tokens" and i == 1 and not event.is_set():
                 yield SimpleNamespace(text="")
@@ -228,6 +230,13 @@ def test_think_turns_on_thinking(mlx):
 def test_a_call_can_turn_thinking_off(mlx):
     LLM("gemma", think=True).chat("s", "u", think=False)
     assert mlx.calls[0]["prompt"][-1] == ("reply", False)
+
+
+def test_thinking_that_never_ends_is_dropped_and_the_call_runs_again_without_it(mlx):
+    mlx.replies = ["<|channel>thought перебираю заметки, перебираю заметки"]
+    mlx.reply = " ответ "
+    assert LLM("gemma", think=True).chat("s", "u") == "ответ"
+    assert [call["prompt"][-1] for call in mlx.calls] == [("reply", True), ("reply", False)]
 
 
 def test_reply_without_thinking_is_kept(mlx):
