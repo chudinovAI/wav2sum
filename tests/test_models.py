@@ -1,4 +1,5 @@
 import threading
+import time
 from typing import ClassVar
 
 import numpy as np
@@ -44,6 +45,99 @@ def test_models_load_lazily_once_and_preload_what_dictation_needs(monkeypatch):
     loaded.preload([RU, EN])
     assert FakeModel.made == ["Transcriber", "EnglishTranscriber", "LanguageDetector", "VoiceActivityDetector"]
     assert loaded.lid.seen == loaded.vad.seen == [16_000]
+
+
+class LockedModel(FakeModel):
+    """Takes a lock the way the real models do: the one it is given, or its own."""
+
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.lock = next((a for a in args if hasattr(a, "acquire")), None) or threading.Lock()
+
+    def transcribe(self, audio):
+        with self.lock:
+            return super().transcribe(audio)
+
+    def detect(self, audio, spans=None):
+        with self.lock:
+            return super().detect(audio, spans)
+
+    def speech_spans(self, audio):
+        with self.lock:
+            return super().speech_spans(audio)
+
+
+def _fake_models(monkeypatch, diarizer):
+    for name in ("Transcriber", "EnglishTranscriber", "LanguageDetector", "VoiceActivityDetector"):
+        monkeypatch.setattr(models, name, type(name, (LockedModel,), {}))
+    monkeypatch.setattr(models, "Diarizer", diarizer)
+    return Models("cpu")
+
+
+def _finishes(call) -> bool:
+    worker = threading.Thread(target=call, daemon=True)
+    worker.start()
+    worker.join(1)
+    return not worker.is_alive()
+
+
+def test_dictation_does_not_wait_for_a_running_diarization(monkeypatch):
+    started, release = threading.Event(), threading.Event()
+
+    class Diarizer(LockedModel):
+        def diarize(self, audio):
+            with self.lock:
+                started.set()
+                release.wait(5)
+
+    loaded = _fake_models(monkeypatch, Diarizer)
+    call = threading.Thread(target=loaded.diarizer.diarize, args=(None,))
+    call.start()
+    started.wait(5)
+    try:
+        assert _finishes(lambda: loaded.preload([RU, EN]))
+    finally:
+        release.set()
+        call.join()
+
+
+def test_dictation_does_not_wait_for_the_diarizer_to_load(monkeypatch):
+    started, release = threading.Event(), threading.Event()
+
+    class Diarizer(LockedModel):
+        def __init__(self, *args):
+            started.set()
+            release.wait(5)
+            super().__init__(*args)
+
+    loaded = _fake_models(monkeypatch, Diarizer)
+    load = threading.Thread(target=lambda: loaded.diarizer)
+    load.start()
+    started.wait(5)
+    try:
+        assert _finishes(lambda: (loaded.vad, loaded.lid, loaded.asr, loaded.english_asr))
+    finally:
+        release.set()
+        load.join()
+
+
+def test_a_model_asked_for_from_two_threads_loads_once(monkeypatch):
+    class Transcriber(LockedModel):
+        def __init__(self, *args):
+            time.sleep(0.1)
+            super().__init__(*args)
+
+    loaded = _fake_models(monkeypatch, LockedModel)
+    monkeypatch.setattr(models, "Transcriber", Transcriber)
+    FakeModel.made = []
+    got = []
+    threads = [threading.Thread(target=lambda: got.append(loaded.asr)) for _ in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert got[0] is got[1]
+    assert FakeModel.made == ["Transcriber"]
 
 
 def test_explicit_device_wins():
