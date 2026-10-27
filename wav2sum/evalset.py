@@ -8,7 +8,6 @@ Measure the current dictation pipeline (only reads the recordings):
 
 import argparse
 import re
-import signal
 import subprocess
 from pathlib import Path
 
@@ -107,11 +106,13 @@ def record(folder: Path) -> None:
         input(f"\n[{i}/{len(PHRASES)}] {text}\nEnter — начать")
         part = path.with_suffix(".part")
         # The default input, as the app records it: AirPods once they are connected.
-        cmd = ["ffmpeg", "-nostdin", "-v", "error", "-y", "-f", "avfoundation", "-i", ":default"]
-        proc = subprocess.Popen([*cmd, "-ac", "1", "-ar", str(SAMPLE_RATE), "-f", "wav", str(part)])
+        cmd = ["ffmpeg", "-v", "error", "-y", "-f", "avfoundation", "-i", ":default"]
+        cmd += ["-ac", "1", "-ar", str(SAMPLE_RATE), "-f", "wav", str(part)]
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
         input("● Enter — стоп")
-        proc.send_signal(signal.SIGINT)
-        if proc.wait() == 0:
+        # "q" on stdin stops ffmpeg with code 0; after SIGINT it exits with 255 even though the file is complete.
+        proc.communicate(b"q")
+        if proc.returncode == 0:
             part.rename(path)
 
 
