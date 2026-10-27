@@ -4,7 +4,16 @@ import numpy as np
 import pytest
 
 from wav2sum.config import AUTO, DictationConfig
-from wav2sum.dictation import MAX_GROWTH, STYLES_EN, Dictator, expand_snippets, mark_snippets, style_for
+from wav2sum.dictation import (
+    MAX_GROWTH,
+    STYLES_EN,
+    DictationStream,
+    Dictator,
+    expand_snippets,
+    mark_snippets,
+    style_for,
+)
+from wav2sum.vad import merge_close_spans
 from wav2sum.vocabulary import Vocabulary
 
 
@@ -205,3 +214,97 @@ def test_broken_or_runaway_translation_raises():
         _dictator("").translate(raw, "default")
     with pytest.raises(ValueError):
         _dictator("Sure! Here is the email: " + "bla " * 50).translate(raw, "default")
+
+
+class SpanAsr:
+    """Names each span by its start, and remembers which spans it was asked for."""
+
+    def __init__(self):
+        self.calls = []
+
+    def transcribe_spans(self, audio, spans):
+        self.calls.append(spans)
+        return [f"{start:g}" for start, _ in spans]
+
+
+def loud_models():
+    """VAD that hears every non-zero sample, so a span ends only when silence follows it, like Silero."""
+
+    def speech_spans(audio):
+        loud = np.flatnonzero(np.diff(np.concatenate([[0], audio != 0, [0]]).astype(int)))
+        spans = [(start / 16_000, end / 16_000) for start, end in zip(loud[::2], loud[1::2], strict=True)]
+        return merge_close_spans(spans, 0.6, 20.0)
+
+    asr = SpanAsr()
+    lid = SimpleNamespace(calls=[])
+    lid.detect = lambda audio, spans: lid.calls.append(spans) or "ru"
+    return SimpleNamespace(vad=SimpleNamespace(speech_spans=speech_spans), lid=lid, asr_for=lambda _: asr, asr=asr)
+
+
+def _speech(*parts):
+    """Seconds of speech and silence in turns, starting with speech."""
+    return np.concatenate(
+        [np.full(int(s * 16_000), 0.5 if i % 2 == 0 else 0.0, np.float32) for i, s in enumerate(parts)]
+    )
+
+
+@pytest.fixture
+def models():
+    return loud_models()
+
+
+def test_stream_recognizes_a_phrase_once_the_next_one_starts(models):
+    audio = _speech(1, 1, 1, 0.3, 1)
+    stream = DictationStream(Dictator(models, DictationConfig(), language="ru"))
+    stream.add(audio[:24_000])
+    stream.step()
+    assert models.asr.calls == []
+    stream.add(audio[24_000:40_000])
+    stream.step()
+    assert models.asr.calls == [[(0.0, 1.0)]]
+    stream.add(audio[40_000:])
+    assert stream.finish() == ("0 2", "ru")
+    assert models.asr.calls == [[(0.0, 1.0)], [(2.0, 4.3)]]
+    assert stream.live > 0
+
+
+def test_streamed_text_matches_the_whole_recording(models):
+    audio = _speech(1.2, 0.8, 2, 1, 0.5, 0.7, 3, 0.2)
+    dictator = Dictator(models, DictationConfig(), language="ru")
+    stream = DictationStream(dictator)
+    for start in range(0, len(audio), 16_000):
+        stream.add(audio[start : start + 16_000])
+        stream.step()
+    assert stream.finish() == dictator.recognize(audio)
+
+
+def test_auto_language_waits_for_three_seconds_of_finished_speech(models):
+    audio = _speech(2, 1, 2, 1, 1)
+    stream = DictationStream(Dictator(models, DictationConfig(), language=AUTO))
+    stream.add(audio[: 4 * 16_000])
+    stream.step()
+    assert (models.lid.calls, models.asr.calls) == ([], [])
+    stream.add(audio[4 * 16_000 :])
+    stream.step()
+    assert (models.lid.calls, models.asr.calls) == ([[(0.0, 2.0), (3.0, 5.0)]], [[(0.0, 2.0), (3.0, 5.0)]])
+    assert stream.finish() == ("0 3 6", "ru")
+    assert len(models.lid.calls) == 1
+
+
+def test_short_auto_dictation_detects_the_language_at_the_end(models):
+    stream = DictationStream(Dictator(models, DictationConfig(), language=AUTO))
+    stream.add(_speech(1, 1, 1))
+    stream.step()
+    assert stream.finish() == ("0 2", "ru")
+    assert models.lid.calls == [[(0.0, 1.0), (2.0, 3.0)]]
+
+
+def test_streamed_dictation_reports_live_and_final_asr(models):
+    dictator = _dictator("Текст", cleanup=False)
+    dictator.models = models
+    stream = DictationStream(dictator)
+    stream.add(_speech(1, 1, 1))
+    stream.step()
+    dictation = dictator.dictate(stream.audio, stream=stream)
+    assert dictation.raw == "0 2"
+    assert set(dictation.timings) == {"asr", "asr_live", "llm"}

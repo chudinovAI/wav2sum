@@ -7,13 +7,15 @@ from silero_vad import get_speech_timestamps, load_silero_vad
 from wav2sum.asr import MAX_SPAN_SEC
 from wav2sum.audio import SAMPLE_RATE
 
+MERGE_GAP_SEC = 0.6
+
 
 class VoiceActivityDetector:
     def __init__(self, lock: "threading.Lock | None" = None):
         self.lock = lock or threading.Lock()
         self.model = load_silero_vad()
 
-    def speech_spans(self, audio: np.ndarray, merge_gap_sec: float = 0.6) -> list[tuple[float, float]]:
+    def speech_spans(self, audio: np.ndarray, merge_gap_sec: float = MERGE_GAP_SEC) -> list[tuple[float, float]]:
         with self.lock:
             stamps = get_speech_timestamps(
                 torch.from_numpy(np.ascontiguousarray(audio)),
