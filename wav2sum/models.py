@@ -59,7 +59,7 @@ class Models:
         self.vad.speech_spans(silence)
 
     def unload(self, name: str) -> None:
-        with self.lock:
+        with self._locks.setdefault(name, threading.Lock()):
             self._loaded.pop(name, None)
             gc.collect()
             if self.device == "mps":

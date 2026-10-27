@@ -67,3 +67,11 @@ Create a Certificate…, name `wav2sum`, identity type Self-Signed Root, certifi
 ```bash
 uv run pytest --cov && uv run ruff check && uv run ruff format --check
 ```
+
+To try the GigaAM encoder on the Neural Engine (CHU-97), convert it to Core ML. The script saves
+`~/Library/Application Support/wav2sum/gigaam-encoder.mlpackage` (one function per clip length: `s5`, `s10`, `s20`)
+and prints how close it is to torch on clips from your recordings. The app does not use the package yet.
+
+```bash
+uv run --group coreml python -m wav2sum.coreml
+```
