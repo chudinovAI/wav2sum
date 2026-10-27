@@ -5,6 +5,7 @@ import pytest
 
 from wav2sum.config import AUTO, DictationConfig
 from wav2sum.dictation import (
+    CLEANUP_EXAMPLES_RU,
     MAX_GROWTH,
     STYLES_EN,
     DictationStream,
@@ -13,6 +14,7 @@ from wav2sum.dictation import (
     fit_to_cursor,
     mark_snippets,
     style_for,
+    user_examples,
 )
 from wav2sum.vad import merge_close_spans
 from wav2sum.vocabulary import Vocabulary
@@ -337,3 +339,26 @@ def test_streamed_dictation_reports_live_and_final_asr(models):
     dictation = dictator.dictate(stream.audio, stream=stream)
     assert dictation.raw == "0 2"
     assert set(dictation.timings) == {"asr", "asr_live", "llm"}
+
+
+def test_user_examples_take_the_3_latest_edits_of_each_style_and_language():
+    def edit(raw, style="chat", language="ru"):
+        return {"raw": raw, "edited": raw.upper(), "style": style, "language": language}
+
+    edits = [edit("пять"), edit("hi", language="en"), edit("четыре"), edit("три", style="email"), edit("два")]
+    edits += [edit("один"), {**edit("переписал"), "edited": "x" * 100}]
+    assert user_examples(edits) == {
+        ("chat", "ru"): [("два", "ДВА"), ("четыре", "ЧЕТЫРЕ"), ("пять", "ПЯТЬ")],
+        ("chat", "en"): [("hi", "HI")],
+        ("email", "ru"): [("три", "ТРИ")],
+    }
+
+
+def test_cleanup_uses_the_users_examples_of_its_style_and_language():
+    calls = []
+    dictator = Dictator(models=None, cfg=DictationConfig(), examples={("chat", "ru"): [("ну да", "Да —")]})
+    dictator.llm = SimpleNamespace(chat=lambda system, text, examples, **kw: calls.append(examples) or text)
+    dictator.clean("ну да конечно", "chat")
+    dictator.clean("ну да конечно", "email")
+    dictator.warm_llm()
+    assert calls == [[("ну да", "Да —")], CLEANUP_EXAMPLES_RU, CLEANUP_EXAMPLES_RU]
