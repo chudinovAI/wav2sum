@@ -10,6 +10,7 @@ A local Krisp + Wispr Flow for macOS: call recording with a transcript and a sum
 - Run: `uv run wav2sum app` (menu bar app and daemon), `uv run wav2sum tui`, `uv run wav2sum meeting.mp3`
 - Dictation latency from the history (read-only): `uv run python -m wav2sum.latency`
 - Dictation quality from the history (read-only): `uv run python -m wav2sum.quality`
+- Numbers and names in a fresh summary of the last 3 calls that their transcripts don't have (read-only): `uv run python -m wav2sum.factcheck [call folder ...]`; run it after a change to the summary prompt or model
 - Dictation WER on the recorded phrase set (read-only): `uv run python -m wav2sum.evalset`; record it with `uv run python -m wav2sum.evalset record quiet` (also `airpods`, `noise`, `whisper`)
 - Convert the GigaAM encoder to Core ML (macOS only): `uv run --group coreml python -m wav2sum.coreml`
 
