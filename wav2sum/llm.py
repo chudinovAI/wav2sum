@@ -69,6 +69,10 @@ class LLM:
                 future.add_done_callback(_log_failure)
             raise
 
+    @property
+    def loaded(self) -> bool:
+        return self.model in _loaded
+
     def count_tokens(self, text: str) -> int:
         return _worker.submit(lambda: len(_load(self.model)[1].encode(text))).result()
 

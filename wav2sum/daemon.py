@@ -72,6 +72,7 @@ class Daemon:
         self.subscribers: set[asyncio.StreamWriter] = set()
         # A dictation being spoken on each connection, with its recognition step in flight.
         self.streams: dict[asyncio.StreamWriter, tuple[DictationStream, asyncio.Task | None]] = {}
+        self.warming: asyncio.Task | None = None
 
     async def run(self) -> None:
         self.loop = asyncio.get_running_loop()
@@ -169,6 +170,9 @@ class Daemon:
     def _dictate_audio(self, request: dict, writer: asyncio.StreamWriter) -> dict:
         if request.get("first"):
             self.streams[writer] = (DictationStream(self.dictator), None)
+            # The LLM unloads after 10 idle minutes; reloading it while the user speaks takes the wait off release.
+            if self.ready.is_set() and not self.dictator.llm.loaded and (self.warming is None or self.warming.done()):
+                self.warming = asyncio.create_task(asyncio.to_thread(self.dictator.warm_llm))
         stream, step = self._stream(writer)
         stream.add(pcm16_to_float(base64.b64decode(request["audio"])))
         # One step at a time: audio that comes in meanwhile waits for the next chunk or the final `dictate`.
