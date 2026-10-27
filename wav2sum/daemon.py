@@ -296,6 +296,8 @@ class Daemon:
             except Exception as e:
                 logger.exception("Job %d failed", job.id)
                 self._update(job, state="failed", error=str(e))
+            if self.queue.empty():
+                await asyncio.to_thread(self.models.unload, "diarizer")
 
     def _update(self, job: Job, state: str, stage: str | None = None, **fields) -> None:
         job.state = state
