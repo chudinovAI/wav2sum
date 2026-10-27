@@ -27,8 +27,6 @@ SUMMARY_PROMPT_RU = f"""\
 **Решения** — что конкретно решили.
 **Задачи** — только то, о чём договорились: исполнитель (имя из разметки), что сделать, срок, если назван.
 **Открытые вопросы** — что осталось нерешённым.
-**Главы** — не больше 8 глав по ходу разговора, каждая строкой «- мм:сс — о чём». Время начала бери из таймкода \
-реплики, с которой началась тема; если тема одна, одна строка.
 
 Правила:
 - Пиши только то, что прямо сказано в разговоре. Не додумывай причины, последствия и детали.
@@ -48,8 +46,7 @@ CHUNK_PROMPT_RU = f"""\
 - обсуждаемые темы и позиции участников;
 - принятые решения;
 - задачи, договорённости и дедлайны (кто и что);
-- открытые вопросы;
-- смены темы: таймкод реплики, с которой началась тема, и о чём она.
+- открытые вопросы.
 Пропускай пункты, которых во фрагменте нет. Сохраняй имена спикеров. Числа, даты и имена бери только из \
 фрагмента, ничего не додумывай.\
 """
@@ -72,8 +69,6 @@ Format: exactly these sections, in this order:
 **Decisions** — what was actually decided.
 **Action items** — only what was agreed: owner (name from the labels), what to do, deadline if one was named.
 **Open questions** — what was left unresolved.
-**Chapters** — at most 8 chapters in the order of the call, each as a line "- mm:ss — what it is about". Take the \
-start time from the timestamp of the utterance where the topic begins; if there is one topic, give one line.
 
 Rules:
 - Write only what was actually said. Don't make up reasons, consequences or details.
@@ -93,8 +88,7 @@ List from this part, as bullet points in English:
 - topics discussed and each side's position;
 - decisions made;
 - action items, agreements and deadlines (who does what);
-- open questions;
-- topic changes: the timestamp of the utterance where a topic begins, and what it is about.
+- open questions.
 Skip points this part doesn't have. Keep speaker names. Take numbers, dates and names only from this part; \
 don't make anything up.\
 """
