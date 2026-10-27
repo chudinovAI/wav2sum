@@ -17,6 +17,9 @@ class FakeTokenizer:
         assert add_generation_prompt
         return {"messages": messages, "thinking": enable_thinking}
 
+    def encode(self, text):
+        return text.split()
+
 
 class FakeMLX:
     """Stands in for mlx_lm and mlx: records loads and generations."""
@@ -25,6 +28,7 @@ class FakeMLX:
         self.reply, self.seconds = reply, seconds
         self.gate = None
         self.error = None
+        self.looping = False
         self.loads, self.calls = [], []
         self.running = self.most_running = 0
 
@@ -42,7 +46,7 @@ class FakeMLX:
             raise self.error
         self.calls.append({"prompt": prompt, "max_tokens": max_tokens, "temp": sampler})
         self.running -= 1
-        return self.reply
+        return " ".join(["бла"] * max_tokens) if self.looping else self.reply
 
 
 TIMERS = []
@@ -111,6 +115,15 @@ def test_chat_sends_system_examples_and_options_and_drops_the_thinking(mlx):
         ("user", "привет"),
     ]
     assert (call["prompt"]["thinking"], call["max_tokens"], call["temp"]) == (False, 4096, 0.2)
+
+
+def test_reply_is_limited_by_the_input_length_and_a_runaway_raises(mlx):
+    llm = LLM("gemma", num_ctx=4096)
+    assert llm.chat("s", "раз два три четыре", max_growth=1.5) == "ответ"
+    mlx.looping = True
+    with pytest.raises(ValueError):
+        llm.chat("s", "раз два три четыре", max_growth=1.5)
+    assert [call["max_tokens"] for call in mlx.calls] == [70, 70]
 
 
 def test_think_turns_on_thinking(mlx):

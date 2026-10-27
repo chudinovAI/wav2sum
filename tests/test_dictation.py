@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from wav2sum.config import AUTO, DictationConfig
-from wav2sum.dictation import STYLES_EN, Dictator, expand_snippets, mark_snippets, style_for
+from wav2sum.dictation import MAX_GROWTH, STYLES_EN, Dictator, expand_snippets, mark_snippets, style_for
 from wav2sum.vocabulary import Vocabulary
 
 
@@ -77,9 +77,11 @@ class ScriptedLLM:
     def __init__(self, reply):
         self.reply = reply
         self.requests = []
+        self.growths = []
 
-    def chat(self, system, user, examples=()):
+    def chat(self, system, user, examples=(), max_growth=None):
         self.requests.append((system, user))
+        self.growths.append(max_growth)
         if isinstance(self.reply, Exception):
             raise self.reply
         return self.reply(user) if callable(self.reply) else self.reply
@@ -105,6 +107,15 @@ def test_broken_or_runaway_cleanup_falls_back_to_raw_text():
     assert _dictator(TimeoutError("ollama is slow")).clean(raw, "default") == raw
     assert _dictator("").clean(raw, "default") == raw
     assert _dictator("Конечно! Вот письмо: " + "бла " * 50).clean(raw, "default") == raw
+
+
+def test_cleanup_and_translation_limit_the_reply_but_a_command_does_not():
+    dictator = _dictator("Текст")
+    dictator.clean("ну давай созвонимся в пятницу", "default")
+    dictator.translate("ну давай созвонимся в пятницу", "default")
+    dictator.models = fake_models("ru")
+    dictator.dictate(np.zeros(16_000), selection="Текст", command=True)
+    assert dictator.llm.growths == [MAX_GROWTH, MAX_GROWTH, None]
 
 
 def test_cleanup_off_inserts_raw_text():
