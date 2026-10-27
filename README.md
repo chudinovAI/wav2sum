@@ -75,3 +75,15 @@ and prints how close it is to torch on clips from your recordings. The app does 
 ```bash
 uv run --group coreml python -m wav2sum.coreml
 ```
+
+To check a change to dictation (audio, VAD, ASR, cleanup) on your own voice, read the 46 phrases of
+`wav2sum/evalset.py` once in each of four conditions: `quiet` (a quiet room), `airpods` (connect AirPods first: the
+recording takes the default input), `noise` (play noise or music from the Mac's speakers), `whisper` (half voice).
+Enter starts and stops each phrase, and phrases already recorded are skipped, so to read one again delete its file
+in `~/wav2sum/evalset/<condition>/`. The measurement only reads the recordings and prints WER and correctly written
+terms per condition, for the raw ASR and after the LLM cleanup.
+
+```bash
+uv run python -m wav2sum.evalset record quiet
+uv run python -m wav2sum.evalset
+```
