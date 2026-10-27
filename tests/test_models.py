@@ -85,3 +85,19 @@ def test_no_speech_defaults_to_russian():
     detector = _detector(-3.0, -0.1)
     assert detector.detect(np.zeros(0, np.float32), [(1.0, 2.0)]) == RU
     assert detector.model.batches == []
+
+
+def test_unload_frees_a_model_and_the_mps_cache(monkeypatch):
+    monkeypatch.setattr(models, "Diarizer", type("Diarizer", (FakeModel,), {}))
+    emptied = []
+    monkeypatch.setattr(torch.mps, "empty_cache", lambda: emptied.append(True))
+
+    loaded = Models("mps")
+    loaded.unload("diarizer")
+    first = loaded.diarizer
+    loaded.unload("diarizer")
+    assert loaded.diarizer is not first
+    assert emptied == [True, True]
+
+    Models("cpu").unload("diarizer")
+    assert emptied == [True, True]
