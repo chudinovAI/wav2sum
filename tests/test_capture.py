@@ -15,6 +15,7 @@ def say(**event):
     print(json.dumps(event), file=sys.stderr, flush=True)
 
 args = sys.argv[1:]
+open(args[0] + ".args", "w").write(json.dumps(args[1:]))
 if "--mic" in args and args[args.index("--mic") + 1] == "missing":
     say(event="error", message="no microphone named missing")
     sys.exit(1)
@@ -66,6 +67,14 @@ def test_recording_writes_audio_and_sidecar(tmp_path, helper):
         "duration_sec": 6.5,
     }
     assert [(lv.seconds, lv.mic_db, lv.sys_db) for lv in levels] == [(6.0, -30.0, -20.0)]
+
+
+def test_call_app_is_passed_to_the_helper(tmp_path, helper):
+    helper()
+    recorder = CallRecorder(tmp_path / "call.wav", app="us.zoom.xos")
+    recorder.start()
+    recorder.stop()
+    assert json.loads((tmp_path / "call.wav.args").read_text()) == ["--app", "us.zoom.xos"]
 
 
 def test_helper_error_is_raised_on_start(tmp_path, helper):

@@ -35,9 +35,17 @@ def new_recording_path(recordings_dir: Path) -> Path:
 
 
 class CallRecorder:
-    def __init__(self, path: Path, mic: str | None = None, on_level: Callable[[Level], None] = lambda level: None):
+    def __init__(
+        self,
+        path: Path,
+        mic: str | None = None,
+        on_level: Callable[[Level], None] = lambda level: None,
+        app: str | None = None,
+    ):
+        """`app` is the bundle id of the call app: the system channel then has only its sound."""
         self.path = path
         self.mic = mic
+        self.app = app
         self.on_level = on_level
         self.seconds = 0.0
         self.mic_name: str | None = None
@@ -51,6 +59,7 @@ class CallRecorder:
     def start(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         cmd = [str(capture_helper()), str(self.path)] + (["--mic", self.mic] if self.mic else [])
+        cmd += ["--app", self.app] if self.app else []
         self._proc = subprocess.Popen(cmd, stderr=subprocess.PIPE, text=True, start_new_session=True)
         self._reader = threading.Thread(target=self._read_events, daemon=True)
         self._reader.start()

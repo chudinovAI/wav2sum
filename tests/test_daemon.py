@@ -20,8 +20,8 @@ ZOOM = "us.zoom.xos"
 
 
 class FakeRecorder:
-    def __init__(self, path, mic, on_level):
-        self.path, self.seconds = path, 0.0
+    def __init__(self, path, mic, on_level, app=None):
+        self.path, self.app, self.seconds = path, app, 0.0
 
     def start(self):
         pass
@@ -59,6 +59,7 @@ def test_call_is_recorded_from_start_to_end(tmp_path, monkeypatch):
         await inputs.put([ZOOM])
         await asyncio.sleep(0.3)
         assert d.status()["recording"]["auto"] == ZOOM
+        assert d.recorder.app == ZOOM
 
         await inputs.put([])
         await asyncio.sleep(0.4)
@@ -81,6 +82,7 @@ def test_manual_stop_mid_call_is_respected(tmp_path, monkeypatch):
         assert d.recorder is None
 
         await d._handle({"cmd": "record_start"}, writer=None)
+        assert d.recorder.app is None
         await inputs.put([])
         await asyncio.sleep(0.4)
         assert d.status()["recording"]["auto"] is None

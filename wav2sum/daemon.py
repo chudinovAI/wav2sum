@@ -250,7 +250,8 @@ class Daemon:
         async with self.recording_lock:
             if self.recorder:
                 raise RuntimeError("already recording")
-            recorder = CallRecorder(new_recording_path(self.cfg.recordings_dir), self.cfg.mic, on_level=self._on_level)
+            path = new_recording_path(self.cfg.recordings_dir)
+            recorder = CallRecorder(path, self.cfg.mic, on_level=self._on_level, app=auto)
             await asyncio.to_thread(recorder.start)
             self.recorder, self.auto_app = recorder, auto
         logger.info("Recording %s%s", recorder.path, f" ({auto} call)" if auto else "")
