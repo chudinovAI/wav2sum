@@ -211,6 +211,7 @@ TITLE_STYLES = [
 MAX_GROWTH = 1.5
 MAX_PROMPT_FIXES = 40
 LANGUAGE_SPEECH_SEC = 3.0
+MAX_USER_EXAMPLES = 3
 
 
 @dataclass
@@ -232,11 +233,15 @@ class Dictator:
         num_ctx: int = 4096,
         vocabulary: Vocabulary | None = None,
         language: str = RU,
+        *,
+        examples: dict[tuple[str, str], list[tuple[str, str]]] | None = None,
     ):
         self.models = models
         self.cfg = cfg
         self.vocabulary = vocabulary or Vocabulary()
         self.language = language
+        # Fixed while the daemon runs, so the prefix cache keeps hitting.
+        self.examples = examples or {}
         # The user is waiting on the HUD: past this, the raw text goes out uncleaned.
         # Unloaded after 10 idle minutes; the daemon reloads it on the first audio chunk of the next dictation.
         self.llm = LLM(
@@ -251,7 +256,7 @@ class Dictator:
         """Loads the weights and the prefix cache of the default cleanup prompt."""
         if self.cfg.cleanup:
             try:
-                self.llm.chat(self._prompt("cleanup", "default"), "ну привет как дела", CLEANUP_EXAMPLES_RU)
+                self.llm.chat(self._prompt("cleanup", "default"), "ну привет как дела", self._examples("default", RU))
             except Exception as e:
                 logger.warning("Dictation LLM %s unavailable: %s", self.llm.model, e)
 
@@ -304,7 +309,7 @@ class Dictator:
                 text = self.llm.chat(
                     self._prompt("cleanup", style, markers=bool(snippets), language=language),
                     marked,
-                    PROMPTS[language].examples,
+                    self._examples(style, language),
                     max_growth=MAX_GROWTH,
                     lookup=True,
                 )
@@ -330,6 +335,9 @@ class Dictator:
         if style == "chat":
             text = _drop_final_period(text)
         return expand_snippets(self.vocabulary.apply(text), snippets)
+
+    def _examples(self, style: str, language: str) -> list[tuple[str, str]]:
+        return self.examples.get((style, language)) or PROMPTS[language].examples
 
     def _prompt(self, task: str, style: str, markers: bool = False, language: str = RU) -> str:
         prompts = PROMPTS[EN if task == "translate" else language]
@@ -403,6 +411,17 @@ def style_for(app: str | None, title: str | None, overrides: dict[str, str]) -> 
         if title and pattern.search(title):
             return style
     return "default"
+
+
+def user_examples(edits: list[dict]) -> dict[tuple[str, str], list[tuple[str, str]]]:
+    """Cleanup examples from the user's own edits, newest first in `edits`: the latest few of each style and language
+    as "raw → edited", oldest first. An edit that grew past what a cleanup may return is a rewrite, not a cleanup."""
+    examples: dict[tuple[str, str], list[tuple[str, str]]] = {}
+    for edit in edits:
+        pairs = examples.setdefault((edit["style"], edit["language"]), [])
+        if len(pairs) < MAX_USER_EXAMPLES and len(edit["edited"]) <= MAX_GROWTH * len(edit["raw"]) + 40:
+            pairs.insert(0, (edit["raw"], edit["edited"]))
+    return examples
 
 
 def mark_snippets(text: str, snippets: dict[str, str]) -> tuple[str, list[str]]:

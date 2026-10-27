@@ -19,6 +19,8 @@ from wav2sum.autorecord import CallDetector, watch_inputs
 from wav2sum.calls import Names, process
 from wav2sum.capture import CallRecorder, Level, new_recording_path
 from wav2sum.config import (
+    EDITS_PATH,
+    HISTORY_PATH,
     LOG_PATH,
     MAX_MESSAGE,
     SOCKET_PATH,
@@ -27,8 +29,8 @@ from wav2sum.config import (
     Config,
     write_default_config,
 )
-from wav2sum.dictation import DictationStream, Dictator
-from wav2sum.history import append_dictation
+from wav2sum.dictation import DictationStream, Dictator, user_examples
+from wav2sum.history import append_dictation, load_dictations
 from wav2sum.llm import LLM, memory_mb
 from wav2sum.models import Models
 from wav2sum.vocabulary import Vocabulary
@@ -59,6 +61,7 @@ class Daemon:
             num_ctx=cfg.num_ctx if shared else 4096,
             vocabulary=Vocabulary(VOCABULARY_PATH),
             language=cfg.language,
+            examples=user_examples(load_dictations(EDITS_PATH)),
         )
         keep_alive = self.dictator.llm.keep_alive if shared else 60
         self.summary_llm = LLM(cfg.model, num_ctx=cfg.num_ctx, think=True, keep_alive=keep_alive)
@@ -232,6 +235,10 @@ class Daemon:
     def _learn(self, original: str, edited: str) -> dict:
         if not self.cfg.dictation.learn:
             return {"learned": []}
+        if dictated := next((e for e in load_dictations(HISTORY_PATH) if e["text"] == original), None):
+            edit = {k: dictated.get(k) for k in ("raw", "text", "style", "language")}
+            now = datetime.now().astimezone().isoformat(timespec="seconds")
+            append_dictation({"time": now, **edit, "edited": edited.strip()}, EDITS_PATH)
         learned = self.dictator.vocabulary.learn(original, edited)
         for heard, written in learned:
             logger.info("Learned from an edit: %r → %r", heard, written)

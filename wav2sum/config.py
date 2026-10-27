@@ -15,6 +15,8 @@ STATE_DIR = Path.home() / "Library" / "Application Support" / "wav2sum"
 SOCKET_PATH = STATE_DIR / "daemon.sock"
 LOG_PATH = STATE_DIR / "daemon.log"
 HISTORY_PATH = STATE_DIR / "dictations.jsonl"
+# How the user edited pasted dictations; the latest ones are the cleanup examples.
+EDITS_PATH = STATE_DIR / "edits.jsonl"
 VOCABULARY_PATH = STATE_DIR / "vocabulary.json"
 MAX_MESSAGE = 64 * 1024 * 1024
 AUTO = "auto"

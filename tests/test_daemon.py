@@ -14,6 +14,7 @@ from wav2sum.autorecord import CallDetector
 from wav2sum.client import DaemonClient, DaemonError
 from wav2sum.config import Config
 from wav2sum.dictation import Dictation
+from wav2sum.history import append_dictation, load_dictations
 
 ZOOM = "us.zoom.xos"
 
@@ -41,6 +42,8 @@ def _daemon(tmp_path, monkeypatch, inputs: asyncio.Queue):
     monkeypatch.setattr(daemon, "CallDetector", functools.partial(CallDetector, start_after=0.05, stop_after=0.1))
     monkeypatch.setattr(daemon, "AUTO_RECORD_TICK", 0.01)
     monkeypatch.setattr(daemon, "VOCABULARY_PATH", tmp_path / "vocabulary.json")
+    monkeypatch.setattr(daemon, "HISTORY_PATH", tmp_path / "dictations.jsonl")
+    monkeypatch.setattr(daemon, "EDITS_PATH", tmp_path / "edits.jsonl")
     monkeypatch.setattr(daemon, "_memory_mb", lambda: 512)
     monkeypatch.setattr(daemon, "memory_mb", lambda: 0)
     d = daemon.Daemon(Config(recordings_dir=tmp_path, output_dir=tmp_path / "output"))
@@ -92,6 +95,23 @@ def test_corrections_are_learned(tmp_path, monkeypatch):
         reply = await d._handle({"cmd": "correction", "original": "Залей на гитхаб", "edited": "Залей на GitHub"}, None)
         assert reply == {"learned": [("гитхаб", "GitHub")]}
         assert d.dictator.vocabulary.apply("гитхаб") == "GitHub"
+
+    asyncio.run(scenario())
+
+
+def test_edits_are_saved_and_become_cleanup_examples_after_a_restart(tmp_path, monkeypatch):
+    dictated = {"raw": "ну залей на гитхаб", "text": "залей на гитхаб", "style": "chat", "language": "ru"}
+    append_dictation({"time": "t", **dictated, "command": False}, tmp_path / "dictations.jsonl")
+
+    async def scenario():
+        d = _daemon(tmp_path, monkeypatch, asyncio.Queue())
+        await d._handle({"cmd": "correction", "original": "залей на гитхаб", "edited": " залей на GitHub"}, None)
+        await d._handle({"cmd": "correction", "original": "не из диктовки", "edited": "не из диктовки!"}, None)
+        assert d.dictator.examples == {}
+        [edit] = load_dictations(tmp_path / "edits.jsonl")
+        assert edit == {"time": edit["time"], **dictated, "edited": "залей на GitHub"}
+        restarted = _daemon(tmp_path, monkeypatch, asyncio.Queue())
+        assert restarted.dictator.examples == {("chat", "ru"): [("ну залей на гитхаб", "залей на GitHub")]}
 
     asyncio.run(scenario())
 
@@ -339,9 +359,11 @@ def test_learning_can_be_turned_off(tmp_path, monkeypatch):
     async def scenario():
         d = _daemon(tmp_path, monkeypatch, asyncio.Queue())
         d.cfg.dictation.learn = False
+        append_dictation({"raw": "залей на гитхаб", "text": "Залей на гитхаб"}, tmp_path / "dictations.jsonl")
         reply = await d._handle({"cmd": "correction", "original": "Залей на гитхаб", "edited": "Залей на GitHub"}, None)
         assert reply == {"learned": []}
         assert not (tmp_path / "vocabulary.json").exists()
+        assert not (tmp_path / "edits.jsonl").exists()
 
     asyncio.run(scenario())
 

@@ -84,14 +84,18 @@ def main(argv: list[str] | None = None) -> None:
 
     import mlx.core as mx
 
-    from wav2sum.config import VOCABULARY_PATH, load_config
-    from wav2sum.dictation import Dictator
+    from wav2sum.config import EDITS_PATH, VOCABULARY_PATH, load_config
+    from wav2sum.dictation import Dictator, user_examples
+    from wav2sum.history import load_dictations
     from wav2sum.llm import _worker
     from wav2sum.models import Models
     from wav2sum.vocabulary import Vocabulary
 
     cfg = load_config()
-    dictator = Dictator(Models(), cfg.dictation, vocabulary=Vocabulary(VOCABULARY_PATH), language=cfg.language)
+    examples = user_examples(load_dictations(EDITS_PATH))
+    dictator = Dictator(
+        Models(), cfg.dictation, vocabulary=Vocabulary(VOCABULARY_PATH), language=cfg.language, examples=examples
+    )
     # The cleanup samples at the dictation temperature; a fixed seed per phrase gives the same numbers on a rerun.
     # MLX keeps the random state per thread, so the seed goes to the LLM thread.
     print(report(dictator, args.dir, seed=lambda: _worker.submit(mx.random.seed, 0).result()))
