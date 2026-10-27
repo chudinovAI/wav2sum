@@ -12,7 +12,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import DataTable, Markdown, Static
+from textual.widgets import DataTable, Input, Markdown, Static
 
 from wav2sum.client import DaemonClient, DaemonError
 from wav2sum.config import LOG_PATH, Config
@@ -88,6 +88,7 @@ class Wav2SumTUI(App):
     DataTable > .datatable--cursor { background: $primary 45%; }
     DataTable:blur > .datatable--cursor { background: $panel-lighten-1; }
     #hints { dock: bottom; height: 1; padding: 0 1; color: $text-muted; }
+    #search { dock: bottom; height: 1; border: none; padding: 0 1; display: none; }
     """
     BINDINGS: ClassVar = [
         Binding("1", "focus('status')", show=False),
@@ -99,6 +100,8 @@ class Wav2SumTUI(App):
         Binding("d", "daemon", show=False),
         Binding("o", "open", show=False),
         Binding("x,delete", "delete", show=False),
+        Binding("slash", "search", show=False),
+        Binding("escape", "clear_search", show=False),
         Binding("q", "quit", show=False),
     ]
 
@@ -109,6 +112,7 @@ class Wav2SumTUI(App):
         self.status: dict = {}
         self.levels = (-120.0, -120.0)
         self.dictations: list[dict] = []
+        self.search_text = ""
 
     def compose(self) -> ComposeResult:
         with Vertical(id="left"):
@@ -122,6 +126,7 @@ class Wav2SumTUI(App):
             yield Markdown(id="view")
             yield Static(id="log", markup=False)
         yield Static(id="hints")
+        yield Input(id="search", placeholder="search calls and dictations")
 
     def on_mount(self) -> None:
         self.query_one("#detail").border_title = "[0] Details"
@@ -136,6 +141,8 @@ class Wav2SumTUI(App):
         table.clear()
         folders = [d for d in self.cfg.output_dir.glob("*") if (d / "meta.json").exists()]
         for folder in sorted(folders, key=lambda d: d.stat().st_mtime, reverse=True):
+            if self.search_text and self.search_text not in _call_text(folder):
+                continue
             meta = json.loads((folder / "meta.json").read_text(encoding="utf-8"))
             speakers = ", ".join(meta.get("speakers", []))
             table.add_row(
@@ -150,7 +157,30 @@ class Wav2SumTUI(App):
         table = self.query_one("#dictations", DataTable)
         table.clear()
         for i, entry in enumerate(self.dictations):
+            if self.search_text not in f"{entry['text']}\n{entry['raw']}".lower():
+                continue
             table.add_row(entry["time"][5:16].replace("T", " "), entry["text"].replace("\n", " ")[:80], key=str(i))
+
+    @on(Input.Changed, "#search")
+    def search_changed(self, event: Input.Changed) -> None:
+        self.search_text = event.value.lower()
+        self.load_calls()
+        self.render_dictations()
+
+    @on(Input.Submitted, "#search")
+    def search_submitted(self) -> None:
+        self.query_one("#calls").focus()
+
+    def action_search(self) -> None:
+        search = self.query_one("#search", Input)
+        search.display = True
+        search.focus()
+
+    def action_clear_search(self) -> None:
+        search = self.query_one("#search", Input)
+        search.value = ""
+        search.display = False
+        self.query_one("#calls").focus()
 
     def render_jobs(self) -> None:
         table = self.query_one("#jobs", DataTable)
@@ -255,6 +285,7 @@ class Wav2SumTUI(App):
             ("d", daemon),
             ("o", "show in Finder"),
             ("x", "delete"),
+            ("/", "search"),
             ("1-4", "panels"),
             ("j/k", "up/down"),
             ("q", "quit"),
@@ -340,6 +371,11 @@ def _call_markdown(folder: Path) -> str:
             match = TRANSCRIPT_LINE.match(line)
             parts.append(f"`{match[1]}` **{match[2]}:** {match[3]}" if match else line)
     return "\n\n".join(parts)
+
+
+def _call_text(folder: Path) -> str:
+    files = [folder / "summary.md", folder / "transcript.txt"]
+    return "\n".join([folder.name, *(f.read_text(encoding="utf-8") for f in files if f.exists())]).lower()
 
 
 def _dictation_markdown(entry: dict) -> str:
