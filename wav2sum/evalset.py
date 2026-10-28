@@ -123,7 +123,10 @@ def record(folder: Path, vp: bool = False) -> None:
         cmd += ["-ac", "1", "-ar", str(SAMPLE_RATE), "-f", "wav", str(part)]
         if vp:
             cmd = [binary, str(part)]
-        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+        proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE if vp else None)
+        if vp:
+            # Voice processing gives sound ~1 s after the start: speak only once the recorder says so.
+            proc.stdout.readline()
         input("● Enter — стоп")
         # "q" on stdin stops ffmpeg with code 0; after SIGINT it exits with 255 even though the file is complete.
         proc.communicate(b"q")

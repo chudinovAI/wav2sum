@@ -1,3 +1,5 @@
+import io
+
 import numpy as np
 
 from wav2sum import evalset
@@ -67,7 +69,8 @@ def test_record_skips_recorded_phrases_and_keeps_only_finished_files(tmp_path, m
     prompts, started = [], []
 
     class FakeProc:
-        def __init__(self, cmd, stdin):
+        def __init__(self, cmd, stdin, stdout):
+            assert stdout is None
             self.part = cmd[-1]
             started.append(cmd)
 
@@ -96,11 +99,14 @@ def test_record_with_voice_processing_builds_the_swift_recorder_once_and_runs_it
     built, started = [], []
 
     class FakeProc:
-        def __init__(self, cmd, stdin):
+        def __init__(self, cmd, stdin, stdout):
+            # The recorder says when the sound goes; "● Enter — стоп" waits for it.
+            self.stdout = io.BytesIO(b"recording\n")
             self.part = cmd[-1]
             started.append(cmd)
 
         def communicate(self, data):
+            assert self.stdout.read() == b""
             with open(self.part, "w") as f:
                 f.write("new")
             self.returncode = 0

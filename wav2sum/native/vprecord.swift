@@ -1,5 +1,6 @@
 // CHU-143: records a dictation phrase from the default input with Apple's voice processing (noise suppression
-// and gain control), until a line or the end of stdin. Writes 16 kHz mono 16-bit WAV.
+// and gain control), until a line or the end of stdin. Writes 16 kHz mono 16-bit WAV. Prints a line once the
+// sound goes: voice processing gives the first buffer ~1 s after start and is quieter for its first ~0.3 s.
 // Usage: vprecord <out.wav>
 import AVFoundation
 
@@ -15,7 +16,14 @@ let lock = NSLock()
 // Only a tap: touching mainMixerNode makes start() fail with -10875 under voice processing.
 input.installTap(onBus: 0, bufferSize: 4800, format: format) { buffer, _ in
     let chunk = UnsafeBufferPointer(start: buffer.floatChannelData![0], count: Int(buffer.frameLength))
-    lock.withLock { samples.append(contentsOf: chunk) }
+    let count = lock.withLock {
+        samples.append(contentsOf: chunk)
+        return samples.count
+    }
+    if count >= Int(format.sampleRate * 0.3) && count - chunk.count < Int(format.sampleRate * 0.3) {
+        print("recording")
+        fflush(stdout)
+    }
 }
 engine.prepare()
 try engine.start()
