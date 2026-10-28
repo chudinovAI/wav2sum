@@ -7,6 +7,7 @@ A local Krisp + Wispr Flow for macOS: call recording with a transcript and a sum
 - Test: `uv run pytest --cov`
 - Lint: `uv run ruff check && uv run ruff format --check`
 - Typecheck Swift (macOS only): `swiftc -typecheck wav2sum/native/app/*.swift && swiftc -typecheck wav2sum/native/capture.swift && swiftc -typecheck wav2sum/native/vprecord.swift && swiftc -typecheck wav2sum/native/app/Logo.swift wav2sum/native/icon/main.swift`
+- Graph (module dependencies as JSON): `uv run pydeps wav2sum --show-deps --no-output --only wav2sum`
 - Run: `uv run wav2sum app` (menu bar app and daemon), `uv run wav2sum tui`, `uv run wav2sum meeting.mp3`
 - Dictation latency from the history (read-only): `uv run python -m wav2sum.latency`
 - Dictation quality from the history (read-only): `uv run python -m wav2sum.quality`
@@ -19,6 +20,7 @@ CI (`.github/workflows/ci.yml`) runs ruff on Linux and the tests (with coverage,
 ## Project memory
 
 - SPEC.md has the goal, the criteria for "done", the list of things that we do not do and the current architecture.
+- ARCHITECTURE.md has the map of the Python code: modules, dependencies, public functions, types. Build it from the Graph command, not from the plan; update it in the PR that changes modules, public functions or types.
 - PLAN.md has the steps for the current task. Each step has a check.
 - Tasks live in Linear: project [wav2sum](https://linear.app/wasted-potentials/project/wav2sum-fa518c5db805), team "chudinov projects" (`CHU`). Name branches and PRs after the issue, for example `CHU-104`.
 - When you open a PR, move the Linear issue to In Review and attach the PR link. After the merge, move it to Done.

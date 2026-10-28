@@ -34,7 +34,7 @@
 
 ## Решения
 
-Текущая архитектура (по коду):
+Текущая архитектура (по коду). Карта модулей, публичных функций и типов — в ARCHITECTURE.md:
 
 - **Процессы.** Swift menu bar приложение (`native/app/`) запускает Python-демон (`daemon.py`) и общается с ним по Unix-сокету `~/Library/Application Support/wav2sum/daemon.sock` строками JSON. Команды: `status`, `subscribe`, `dictate_audio` (кусок звука диктовки во время речи, `first` начинает новую), `dictate` (с полями `command` и `translate` для режима, `streamed` — в `audio` только хвост после `dictate_audio`, `before` и `after` — до 20 символов поля по обе стороны курсора: по ним `fit_to_cursor` ставит строчную и пробел в начале и убирает точку в конце), `correction`, `record_start`, `record_stop`, `process`, `shutdown`. CLI (`cli.py`) и TUI (`tui.py`) ходят в тот же демон через `client.py`.
 - **Модели в памяти.** `models.py` держит ASR, VAD, диаризацию и определение языка; демон грузит их один раз и переиспользует для звонков и диктовки. Диаризацию (pyannote) демон выгружает, когда очередь звонков пуста, и на MPS отдаёт кэш PyTorch (`torch.mps.empty_cache()`).
