@@ -102,8 +102,8 @@ final class StereoWriter {
     private let lock = NSLock()
     private var pending: [Float] = []
     private let file: AVAudioFile
-    private let inFormat: AVAudioFormat
-    private let converter: AVAudioConverter
+    private var inFormat: AVAudioFormat
+    private var converter: AVAudioConverter
     private(set) var framesWritten: AVAudioFramePosition = 0
     var seconds: Double { Double(framesWritten) / converter.outputFormat.sampleRate }
 
@@ -177,6 +177,24 @@ final class StereoWriter {
         return (db(sumL), db(sumR))
     }
 
+    /// After a switch of the mic: the rest of the old device goes to the file, silence fills it up to `seconds`,
+    /// and the new device's rate is used from now on.
+    func restart(deviceRate: Double, at seconds: Double) throws {
+        try flush(final: true)
+        let outFormat = converter.outputFormat
+        let gap = AVAudioFrameCount(max(0, (seconds - self.seconds) * outFormat.sampleRate))
+        if gap > 0 {
+            let silence = AVAudioPCMBuffer(pcmFormat: outFormat, frameCapacity: gap)!
+            silence.frameLength = gap
+            for c in 0..<2 { silence.floatChannelData![c].update(repeating: 0, count: Int(gap)) }
+            try file.write(from: silence)
+            framesWritten += AVAudioFramePosition(gap)
+        }
+        inFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: deviceRate, channels: 2, interleaved: false)!
+        converter = AVAudioConverter(from: inFormat, to: outFormat)!
+        converter.sampleRateConverterQuality = AVAudioQuality.high.rawValue
+    }
+
     func close() throws {
         try flush(final: true)
         file.close()
@@ -207,11 +225,12 @@ final class Recorder {
     private var aggregateID = AudioObjectID(kAudioObjectUnknown)
     private var ioProcID: AudioDeviceIOProcID?
     private let writer: StereoWriter
-    private let mic: InputDevice
-    private let sampleRate: Double
+    private var mic: InputDevice
+    private var sampleRate: Double
     private let tap: CATapDescription
     private let app: String?
     private var processes: [AudioObjectID] = []
+    private var startedAt = Date()
 
     /// With `app`, the system channel is only that app's sound; without it, all sound of the Mac.
     /// The tap does not auto-start the aggregate: a tap of a silent app would hold back the mic too.
@@ -231,6 +250,13 @@ final class Recorder {
         tap.muteBehavior = .unmuted
         try check(AudioHardwareCreateProcessTap(tap, &tapID), "AudioHardwareCreateProcessTap")
 
+        aggregateID = try Recorder.makeAggregate(mic: mic, tap: tap)
+        sampleRate = try readValue(aggregateID, kAudioDevicePropertyNominalSampleRate, initial: Float64(0))
+        writer = try StereoWriter(url: url, deviceRate: sampleRate, outRate: outRate)
+    }
+
+    /// The mic is the main device of the aggregate, so its clock drives the recording.
+    static func makeAggregate(mic: InputDevice, tap: CATapDescription) throws -> AudioObjectID {
         let description: [String: Any] = [
             kAudioAggregateDeviceNameKey: "wav2sum capture",
             kAudioAggregateDeviceUIDKey: "wav2sum-capture-\(UUID().uuidString)",
@@ -244,14 +270,31 @@ final class Recorder {
                 kAudioSubTapDriftCompensationKey: true,
             ]],
         ]
-        try check(AudioHardwareCreateAggregateDevice(description as CFDictionary, &aggregateID),
-                  "AudioHardwareCreateAggregateDevice")
-
-        sampleRate = try readValue(aggregateID, kAudioDevicePropertyNominalSampleRate, initial: Float64(0))
-        writer = try StereoWriter(url: url, deviceRate: sampleRate, outRate: outRate)
+        var id = AudioObjectID(kAudioObjectUnknown)
+        try check(AudioHardwareCreateAggregateDevice(description as CFDictionary, &id), "AudioHardwareCreateAggregateDevice")
+        return id
     }
 
     func start() throws {
+        startedAt = Date()
+        let streams = try startIO()
+        emit(["event": "started", "mic": mic.name, "device_rate": sampleRate, "streams": streams, "processes": processes])
+    }
+
+    /// Another input is picked, or the mic is gone and macOS picked another one: the same wav goes on from the new mic,
+    /// and the gap is silence, so the channels stay in time with the call.
+    func follow(_ newMic: InputDevice) throws {
+        guard newMic.uid != mic.uid || ioProcID == nil else { return }
+        stopIO()
+        aggregateID = try Recorder.makeAggregate(mic: newMic, tap: tap)
+        mic = newMic
+        sampleRate = try readValue(aggregateID, kAudioDevicePropertyNominalSampleRate, initial: Float64(0))
+        try writer.restart(deviceRate: sampleRate, at: Date().timeIntervalSince(startedAt))
+        let streams = try startIO()
+        emit(["event": "warning", "message": "microphone changed to \(mic.name) (\(sampleRate) Hz, streams \(streams))"])
+    }
+
+    private func startIO() throws -> [Int] {
         let streams = try inputStreamChannels(aggregateID)
         let micChannels = mic.channels
         let writer = self.writer
@@ -299,7 +342,17 @@ final class Recorder {
         }, "AudioDeviceCreateIOProcIDWithBlock")
 
         try check(AudioDeviceStart(aggregateID, ioProcID), "AudioDeviceStart")
-        emit(["event": "started", "mic": mic.name, "device_rate": sampleRate, "streams": streams, "processes": processes])
+        return streams
+    }
+
+    private func stopIO() {
+        if let ioProcID {
+            AudioDeviceStop(aggregateID, ioProcID)
+            AudioDeviceDestroyIOProcID(aggregateID, ioProcID)
+        }
+        ioProcID = nil
+        if aggregateID != kAudioObjectUnknown { AudioHardwareDestroyAggregateDevice(aggregateID) }
+        aggregateID = AudioObjectID(kAudioObjectUnknown)
     }
 
     /// A call app starts its helpers during the call and can restart them; the tap follows the new processes.
@@ -321,11 +374,7 @@ final class Recorder {
     var seconds: Double { writer.seconds }
 
     func stop() {
-        if let ioProcID {
-            AudioDeviceStop(aggregateID, ioProcID)
-            AudioDeviceDestroyIOProcID(aggregateID, ioProcID)
-        }
-        if aggregateID != kAudioObjectUnknown { AudioHardwareDestroyAggregateDevice(aggregateID) }
+        stopIO()
         if tapID != kAudioObjectUnknown { AudioHardwareDestroyProcessTap(tapID) }
         do { try writer.close() } catch { emit(["event": "error", "message": "close: \(error)"]) }
     }
@@ -429,6 +478,14 @@ do {
 var processList = address(kAudioHardwarePropertyProcessObjectList)
 AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &processList, .main) { _, _ in
     do { try recorder.followApp() } catch { emit(["event": "warning", "message": "\(error)"]) }
+}
+
+// A mic given with --mic stays; otherwise the recording follows the default input, as the call app does.
+if micQuery == nil {
+    var defaultInput = address(kAudioHardwarePropertyDefaultInputDevice)
+    AudioObjectAddPropertyListenerBlock(AudioObjectID(kAudioObjectSystemObject), &defaultInput, .main) { _, _ in
+        do { try recorder.follow(defaultInputDevice()) } catch { emit(["event": "warning", "message": "\(error)"]) }
+    }
 }
 
 let flushTimer = DispatchSource.makeTimerSource(queue: .main)
