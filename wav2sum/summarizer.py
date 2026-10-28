@@ -20,13 +20,16 @@ ASR_NOTE_RU = """\
 """
 
 SUMMARY_PROMPT_RU = f"""\
-Ты составляешь саммари рабочего созвона на русском языке.
+Ты составляешь саммари созвона на русском языке: рабочего созвона, 1:1, интервью, урока или другого разговора.
 Тебе дан транскрипт с разметкой по спикерам (или заметки по частям созвона).
 {ASR_NOTE_RU}
 
-Формат — ровно эти разделы, в этом порядке:
+Формат — эти разделы, в этом порядке:
 **Тема** — одно предложение.
 **Обсуждения** — главные темы и позиции участников, тезисно, не больше 7 пунктов.
+Раздел под суть встречи, со своим названием, — то, что из этой встречи стоит вынести и что не ложится в другие \
+разделы: например, советы и замечания преподавателя на уроке, впечатления и следующий шаг на интервью, обратная \
+связь на 1:1.
 **Решения** — что конкретно решили.
 **Задачи** — только то, о чём договорились: исполнитель (имя из разметки), что сделать, срок, если назван.
 **Открытые вопросы** — что осталось нерешённым.
@@ -34,14 +37,14 @@ SUMMARY_PROMPT_RU = f"""\
 Правила:
 - Пиши только то, что прямо сказано в разговоре. Не додумывай причины, последствия и детали.
 - Числа, даты, сроки, имена и названия бери только из транскрипта. Если срок не назван, не указывай его.
-- Если для раздела в разговоре ничего нет, напиши в нём «Не обсуждалось». Это нормальный ответ, не заполняй \
-раздел ради заполнения.
+- Если для раздела, кроме «Тема» и «Обсуждения», в разговоре ничего нет, не пиши этот раздел вовсе, даже \
+заголовок. Не заполняй раздел ради заполнения.
 - Кто говорит, видно из разметки. Отдельно участников не перечисляй.
 - Лучше коротко и точно, чем подробно и с домыслами.\
 """
 
 CHUNK_PROMPT_RU = f"""\
-Тебе дан фрагмент транскрипта рабочего созвона с разметкой по спикерам.
+Тебе дан фрагмент транскрипта созвона с разметкой по спикерам.
 {ASR_NOTE_RU}
 
 Это только ЧАСТЬ встречи. Не пиши итоговое саммари.
@@ -49,6 +52,7 @@ CHUNK_PROMPT_RU = f"""\
 - обсуждаемые темы и позиции участников;
 - принятые решения;
 - задачи, договорённости и дедлайны (кто и что);
+- советы, замечания и обратная связь (кто кому);
 - открытые вопросы.
 Пропускай пункты, которых во фрагменте нет. Сохраняй имена спикеров. Числа, даты и имена бери только из \
 фрагмента, ничего не додумывай.\
@@ -62,13 +66,16 @@ sense of.\
 """
 
 SUMMARY_PROMPT_EN = f"""\
-You write a summary of a work call in English.
+You write a summary of a call in English: a work call, a 1:1, an interview, a lesson or another conversation.
 You are given a speaker-labelled transcript (or notes on parts of the call).
 {ASR_NOTE_EN}
 
-Format: exactly these sections, in this order:
+Format: these sections, in this order:
 **Topic** — one sentence.
 **Discussion** — the main topics and each side's position, as bullet points, at most 7.
+A section for what the meeting was about, under a title of its own: what is worth taking away from it that doesn't \
+fit the other sections, such as a teacher's advice and remarks in a lesson, impressions and the next step in an \
+interview, feedback in a 1:1.
 **Decisions** — what was actually decided.
 **Action items** — only what was agreed: owner (name from the labels), what to do, deadline if one was named.
 **Open questions** — what was left unresolved.
@@ -76,14 +83,14 @@ Format: exactly these sections, in this order:
 Rules:
 - Write only what was actually said. Don't make up reasons, consequences or details.
 - Take numbers, dates, deadlines, names and titles only from the transcript. If no deadline was named, give none.
-- If the call had nothing for a section, write "Not discussed" in it. That is a fine answer; don't fill a \
-section for the sake of it.
+- If the call had nothing for a section other than Topic and Discussion, leave that section out, heading and \
+all. Don't fill a section for the sake of it.
 - The labels show who speaks. Don't list participants separately.
 - Short and accurate beats detailed and speculative.\
 """
 
 CHUNK_PROMPT_EN = f"""\
-You are given a part of a speaker-labelled transcript of a work call.
+You are given a part of a speaker-labelled transcript of a call.
 {ASR_NOTE_EN}
 
 This is only PART of the meeting. Don't write a final summary.
@@ -91,6 +98,7 @@ List from this part, as bullet points in English:
 - topics discussed and each side's position;
 - decisions made;
 - action items, agreements and deadlines (who does what);
+- advice, remarks and feedback (who to whom);
 - open questions.
 Skip points this part doesn't have. Keep speaker names. Take numbers, dates and names only from this part; \
 don't make anything up.\
