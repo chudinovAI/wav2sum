@@ -19,7 +19,7 @@ from wav2sum.vocabulary import Vocabulary
 
 logger = logging.getLogger(__name__)
 
-CACHE_VERSION = 6
+CACHE_VERSION = 7
 
 CALL = "call"
 MONO = "mono"
@@ -110,11 +110,7 @@ def process(
     cache_file = out_root / ".cache" / file_hash(audio_path) / "utterances.json" if use_cache else None
     audio = load_audio(audio_path, channels=2 if layout == CALL else 1)
 
-    def compute() -> tuple[list[Utterance], str]:
-        detected = detect_language(audio, models) if language == AUTO else language
-        return transcribe(audio, layout, speakers, models, detected), detected
-
-    utterances, language = _cached(cache_file, params, compute)
+    utterances, language = _cached(cache_file, params, lambda: transcribe(audio, layout, speakers, models, language))
     timings["transcription"] = time.monotonic() - started
 
     conversation = build_conversation(
@@ -137,14 +133,10 @@ def process(
     return result
 
 
-def detect_language(audio: np.ndarray, models: Models) -> str:
-    mixed = audio.mean(axis=1)
-    return models.lid.detect(mixed, models.vad.speech_spans(mixed))
-
-
 def transcribe(
     audio: np.ndarray, layout: str, speakers: Speakers, models: Models, language: str = RU
-) -> list[Utterance]:
+) -> tuple[list[Utterance], str]:
+    """With AUTO each channel gets its own language; the call's language is mine, or theirs if I said nothing."""
     if layout == MONO:
         turns = models.diarizer.diarize(audio[:, 0], speakers.count, speakers.min, speakers.max)
         return _transcribe_channel(audio[:, 0], turns, SPEAKER, models, language)
@@ -152,20 +144,25 @@ def transcribe(
     mic, system = audio[:, 0], audio[:, 1]
     remote = speakers.without_me()
     turns = None if remote.just_one else models.diarizer.diarize(system, remote.count, remote.min, remote.max)
-    theirs = _transcribe_channel(system, turns, THEM, models, language)
-    mine = _transcribe_channel(suppress_echo(mic, system), None, ME, models, language)
-    return drop_echo(mine, theirs) + theirs
+    theirs, their_language = _transcribe_channel(system, turns, THEM, models, language)
+    mine, my_language = _transcribe_channel(suppress_echo(mic, system), None, ME, models, language)
+    return drop_echo(mine, theirs) + theirs, my_language if mine else their_language
 
 
-def _transcribe_channel(audio: np.ndarray, turns, key: str, models: Models, language: str) -> list[Utterance]:
+def _transcribe_channel(
+    audio: np.ndarray, turns, key: str, models: Models, language: str
+) -> tuple[list[Utterance], str]:
     spans = models.vad.speech_spans(audio)
+    if language == AUTO:
+        language = models.lid.detect(audio, spans)
     pieces = split_by_turns(spans, turns) if turns is not None else [Piece(s, e, None) for s, e in spans]
     texts = models.asr_for(language).transcribe_spans(audio, [(p.start, p.end) for p in pieces])
-    return [
+    utterances = [
         Utterance(p.start, p.end, text, key if p.speaker is None else f"{key}:{p.speaker}")
         for p, text in zip(pieces, texts, strict=True)
         if text
     ]
+    return utterances, language
 
 
 def _cached(
