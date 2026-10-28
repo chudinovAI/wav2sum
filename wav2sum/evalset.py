@@ -2,6 +2,8 @@
 
 Record each condition once (Enter starts and stops a phrase; phrases already recorded are skipped):
     uv run python -m wav2sum.evalset record quiet
+The same with Apple's voice processing, into another folder:
+    uv run python -m wav2sum.evalset --dir ~/wav2sum/evalset-vp record noise --vp
 Measure the current dictation pipeline (only reads the recordings):
     uv run python -m wav2sum.evalset
 """
@@ -9,6 +11,7 @@ Measure the current dictation pipeline (only reads the recordings):
 import argparse
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 
 from wav2sum.audio import SAMPLE_RATE, load_audio
@@ -17,6 +20,8 @@ DIR = Path("~/wav2sum/evalset").expanduser()
 # Quiet room, AirPods mic, noise from the Mac's speakers, half voice.
 CONDITIONS = ["quiet", "airpods", "noise", "whisper"]
 STYLE = "default"
+# Apple's voice processing (noise suppression and gain control) works only on a live microphone (CHU-143).
+VP_RECORDER = Path(__file__).parent / "native" / "vprecord.swift"
 
 # Text as it should be written, and the terms that must come out exactly so. A phrase's file is its number,
 # so new phrases go only at the end.
@@ -74,12 +79,12 @@ def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="python -m wav2sum.evalset", description=__doc__.splitlines()[0])
     parser.add_argument("--dir", type=Path, default=DIR)
     commands = parser.add_subparsers(dest="command")
-    commands.add_parser("record", help="read the phrases into the microphone").add_argument(
-        "condition", choices=CONDITIONS
-    )
+    recorder = commands.add_parser("record", help="read the phrases into the microphone")
+    recorder.add_argument("condition", choices=CONDITIONS)
+    recorder.add_argument("--vp", action="store_true", help="record with Apple's voice processing")
     args = parser.parse_args(argv)
     if args.command == "record":
-        record(args.dir / args.condition)
+        record(args.dir / args.condition, vp=args.vp)
         return
 
     import mlx.core as mx
@@ -101,17 +106,23 @@ def main(argv: list[str] | None = None) -> None:
     print(report(dictator, args.dir, seed=lambda: _worker.submit(mx.random.seed, 0).result()))
 
 
-def record(folder: Path) -> None:
+def record(folder: Path, vp: bool = False) -> None:
     folder.mkdir(parents=True, exist_ok=True)
+    if vp:
+        binary = str(Path(tempfile.mkdtemp()) / "vprecord")
+        subprocess.run(["swiftc", "-O", str(VP_RECORDER), "-o", binary], check=True)
     for i, (text, _) in enumerate(PHRASES, 1):
         path = folder / f"{i:02}.wav"
         if path.exists():
             continue
         input(f"\n[{i}/{len(PHRASES)}] {text}\nEnter — начать")
-        part = path.with_suffix(".part")
+        # AVAudioFile picks the file type by the extension.
+        part = path.with_suffix(".part.wav")
         # The default input, as the app records it: AirPods once they are connected.
         cmd = ["ffmpeg", "-v", "error", "-y", "-f", "avfoundation", "-i", ":default"]
         cmd += ["-ac", "1", "-ar", str(SAMPLE_RATE), "-f", "wav", str(part)]
+        if vp:
+            cmd = [binary, str(part)]
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
         input("● Enter — стоп")
         # "q" on stdin stops ffmpeg with code 0; after SIGINT it exits with 255 even though the file is complete.

@@ -39,4 +39,5 @@ jobs:
         run: |
           swiftc -typecheck wav2sum/native/app/*.swift
           swiftc -typecheck wav2sum/native/capture.swift
+          swiftc -typecheck wav2sum/native/vprecord.swift
           swiftc -typecheck wav2sum/native/app/Logo.swift wav2sum/native/icon/main.swift
