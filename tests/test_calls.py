@@ -55,7 +55,7 @@ def fake_models(language="ru", turns=None):
 
     return SimpleNamespace(
         vad=FakeVad(),
-        lid=SimpleNamespace(detect=lambda audio, spans: language),
+        lid=SimpleNamespace(detect=language if callable(language) else lambda audio, spans: language),
         asr_for=asr.__getitem__,
         asr=asr,
         diarizer=SimpleNamespace(diarize=diarize),
@@ -182,6 +182,25 @@ def test_detected_language_picks_recognizer_and_summary_language(tmp_path, monke
     assert models.asr["ru"].calls == 0
     assert [u.text for u in result.utterances] == ["hello there", "good morning"]
     assert llm.requests[0][0].startswith("You write a summary")
+
+
+def _language_by_loudness(audio, spans):
+    return "en" if np.abs(audio).max() > 0.6 else "ru"
+
+
+@pytest.mark.parametrize(("mine_amp", "language"), [(0.3, "ru"), (0.0, "en")])
+def test_each_side_of_a_call_gets_its_own_recognizer(tmp_path, monkeypatch, mine_amp, language):
+    audio = _call(tmp_path, monkeypatch, mine_amp=mine_amp, theirs_amp=0.7)
+    models = fake_models(language=_language_by_loudness)
+    llm = FakeLLM()
+
+    result = process(audio, models, tmp_path / "output", llm=llm, names=Names("Я", "Илья"))
+
+    assert [(u.speaker, u.text) for u in result.utterances] == [("Я", "привет гитхаб")] * bool(mine_amp) + [
+        ("Илья", "hello there")
+    ]
+    assert models.asr["en"].calls == 1
+    assert result.language == language
 
 
 def test_my_speech_leaking_from_their_side_is_dropped(tmp_path, monkeypatch):
