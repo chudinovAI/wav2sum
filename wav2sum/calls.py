@@ -19,7 +19,7 @@ from wav2sum.vocabulary import Vocabulary
 
 logger = logging.getLogger(__name__)
 
-CACHE_VERSION = 7
+CACHE_VERSION = 8
 
 CALL = "call"
 MONO = "mono"
@@ -144,6 +144,8 @@ def transcribe(
     mic, system = audio[:, 0], audio[:, 1]
     remote = speakers.without_me()
     turns = None if remote.just_one else models.diarizer.diarize(system, remote.count, remote.min, remote.max)
+    if remote.count is None and turns is not None and len({t.speaker for t in turns}) == 1:
+        turns = None  # one person found in a range is plain "them", as in a 1-on-1 call
     theirs, their_language = _transcribe_channel(system, turns, THEM, models, language)
     mine, my_language = _transcribe_channel(suppress_echo(mic, system), None, ME, models, language)
     return drop_echo(mine, theirs) + theirs, my_language if mine else their_language

@@ -171,6 +171,17 @@ def test_remote_side_is_diarized_when_more_than_two_people(tmp_path, monkeypatch
     assert [u.speaker for u in result.utterances] == ["Я", "Они 2"]
 
 
+def test_one_person_found_in_a_range_keeps_the_plain_name(tmp_path, monkeypatch):
+    audio = _call(tmp_path, monkeypatch)
+    models = fake_models(turns=[Turn(0, 3.0, 5.0)])
+
+    result = process(
+        audio, models, tmp_path / "output", llm=None, speakers=Speakers(None, 2, 7), names=Names("Я", "Илья")
+    )
+
+    assert [u.speaker for u in result.utterances] == ["Я", "Илья"]
+
+
 def test_detected_language_picks_recognizer_and_summary_language(tmp_path, monkeypatch):
     audio = _call(tmp_path, monkeypatch, mine_amp=0.7, theirs_amp=0.9)
     models = fake_models(language="en")
