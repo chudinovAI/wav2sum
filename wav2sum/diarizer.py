@@ -37,6 +37,8 @@ class Diarizer:
         self.lock = lock or threading.Lock()
         logger.info("Loading pyannote on %s …", device)
         self.pipeline = Pipeline.from_pretrained(MODEL_ID, token=token)
+        # The default Fb 0.8 makes a second person of short "okay"/"mm" in a 1-on-1 call (CHU-132).
+        self.pipeline.instantiate({"clustering": {"Fb": 2.0}})
         self.pipeline.to(torch.device(device))
 
     def diarize(
