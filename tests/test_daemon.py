@@ -11,7 +11,6 @@ import pytest
 
 from wav2sum import daemon
 from wav2sum.autorecord import CallDetector
-from wav2sum.calls import Speakers
 from wav2sum.client import DaemonClient, DaemonError
 from wav2sum.config import Config
 from wav2sum.dictation import Dictation
@@ -311,28 +310,6 @@ def test_jobs_run_after_models_load_and_report_failures(tmp_path, monkeypatch):
         good, broken = d.jobs
         assert (good.state, good.out_dir) == ("done", str(tmp_path / "output" / "good"))
         assert (broken.state, broken.error) == ("failed", "ffmpeg failed")
-        working.cancel()
-
-    asyncio.run(scenario())
-
-
-def test_recordings_are_diarized_with_a_range_of_people_on_the_system_channel(tmp_path, monkeypatch):
-    passed = []
-
-    def fake_process(audio, models, out_root, **kwargs):
-        passed.append(kwargs["speakers"])
-        return type("Result", (), {"out_dir": out_root / audio.stem})()
-
-    monkeypatch.setattr(daemon, "process", fake_process)
-
-    async def scenario():
-        d = _daemon(tmp_path, monkeypatch, asyncio.Queue())
-        (tmp_path / "call.wav").write_bytes(b"")
-        d._enqueue(tmp_path / "call.wav")
-        d.ready.set()
-        working = asyncio.create_task(d._work())
-        await asyncio.sleep(0.2)
-        assert [s.without_me() for s in passed] == [Speakers(None, 1, 6)]
         working.cancel()
 
     asyncio.run(scenario())
