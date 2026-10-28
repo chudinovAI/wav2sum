@@ -1,5 +1,6 @@
+from wav2sum.language import EN, RU
 from wav2sum.llm import LLM
-from wav2sum.summarizer import chapters, chunk_transcript, summarize
+from wav2sum.summarizer import PROMPTS, chapters, chunk_transcript, summarize
 
 
 class FakeLLM(LLM):
@@ -152,3 +153,11 @@ def test_more_than_8_chapters_are_merged_in_one_more_call():
     assert chapters(transcript, llm) == "**Главы**\n- 00:00 — Первая половина\n- 06:00 — Вторая половина"
     assert llm.calls[1][1] == "\n".join(f"- {i:02d}:00 — Тема {i}" for i in range(12))
     assert llm.calls[1][3] is False
+
+
+def test_summary_prompts_skip_empty_sections_instead_of_a_placeholder():
+    # A lesson got three "Not discussed" sections out of five, and the teacher's advice was lost (CHU-141).
+    for prompts in PROMPTS.values():
+        assert "Не обсуждалось" not in prompts.summary and "Not discussed" not in prompts.summary
+    assert "советы" in PROMPTS[RU].summary and "советы" in PROMPTS[RU].chunk
+    assert "advice" in PROMPTS[EN].summary and "advice" in PROMPTS[EN].chunk
