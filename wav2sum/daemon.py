@@ -16,7 +16,7 @@ from pathlib import Path
 from wav2sum import __version__
 from wav2sum.audio import pcm16_to_float
 from wav2sum.autorecord import CallDetector, watch_inputs
-from wav2sum.calls import Names, Speakers, process
+from wav2sum.calls import Names, process
 from wav2sum.capture import CallRecorder, Level, new_recording_path
 from wav2sum.config import (
     EDITS_PATH,
@@ -337,8 +337,6 @@ class Daemon:
                     self.models,
                     self.cfg.output_dir,
                     llm=self.summary_llm,
-                    # Me plus 1–6 people on the system channel: a group call gets each of them, not one "them".
-                    speakers=Speakers(None, 2, 7),
                     names=Names(self.cfg.me, self.cfg.them),
                     language=self.cfg.language,
                     vocabulary=Vocabulary(VOCABULARY_PATH),
