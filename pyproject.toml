@@ -30,6 +30,7 @@ build-backend = "hatchling.build"
 
 [dependency-groups]
 dev = [
+    "pydeps>=3.0.9",
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
     "pytest-timeout>=2.4.0",
