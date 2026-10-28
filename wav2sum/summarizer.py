@@ -38,7 +38,8 @@ SUMMARY_PROMPT_RU = f"""\
 - Пиши только то, что прямо сказано в разговоре. Не додумывай причины, последствия и детали.
 - Числа, даты, сроки, имена и названия бери только из транскрипта. Если срок не назван, не указывай его.
 - Если для раздела, кроме «Тема» и «Обсуждения», в разговоре ничего нет, не пиши этот раздел вовсе, даже \
-заголовок. Не заполняй раздел ради заполнения.
+заголовок. Не пиши раздел, чтобы сказать, что в нём ничего нет («Нет», «Решений не принято»), и не заполняй его \
+ради заполнения.
 - Кто говорит, видно из разметки. Отдельно участников не перечисляй.
 - Лучше коротко и точно, чем подробно и с домыслами.\
 """
@@ -84,7 +85,8 @@ Rules:
 - Write only what was actually said. Don't make up reasons, consequences or details.
 - Take numbers, dates, deadlines, names and titles only from the transcript. If no deadline was named, give none.
 - If the call had nothing for a section other than Topic and Discussion, leave that section out, heading and \
-all. Don't fill a section for the sake of it.
+all. Don't write a section to say it is empty ("None", "No decisions were made"), and don't fill one for the sake \
+of it.
 - The labels show who speaks. Don't list participants separately.
 - Short and accurate beats detailed and speculative.\
 """
