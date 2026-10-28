@@ -1,3 +1,5 @@
+import io
+
 import numpy as np
 
 from wav2sum import evalset
@@ -67,7 +69,8 @@ def test_record_skips_recorded_phrases_and_keeps_only_finished_files(tmp_path, m
     prompts, started = [], []
 
     class FakeProc:
-        def __init__(self, cmd, stdin):
+        def __init__(self, cmd, stdin, stdout):
+            assert stdout is None
             self.part = cmd[-1]
             started.append(cmd)
 
@@ -89,3 +92,32 @@ def test_record_skips_recorded_phrases_and_keeps_only_finished_files(tmp_path, m
     assert len(started) == 2
     assert "[2/3] два" in prompts[0]
     assert "-ar" in started[0] and "16000" in started[0]
+
+
+def test_record_with_voice_processing_builds_the_swift_recorder_once_and_runs_it(tmp_path, monkeypatch):
+    monkeypatch.setattr(evalset, "PHRASES", [("раз", []), ("два", [])])
+    built, started = [], []
+
+    class FakeProc:
+        def __init__(self, cmd, stdin, stdout):
+            # The recorder says when the sound goes; "● Enter — стоп" waits for it.
+            self.stdout = io.BytesIO(b"recording\n")
+            self.part = cmd[-1]
+            started.append(cmd)
+
+        def communicate(self, data):
+            assert self.stdout.read() == b""
+            with open(self.part, "w") as f:
+                f.write("new")
+            self.returncode = 0
+
+    monkeypatch.setattr(evalset.subprocess, "run", lambda cmd, check: built.append(cmd))
+    monkeypatch.setattr(evalset.subprocess, "Popen", FakeProc)
+    monkeypatch.setattr("builtins.input", lambda _: None)
+
+    record(tmp_path, vp=True)
+
+    assert len(built) == 1
+    assert built[0][0] == "swiftc" and built[0][-3:-1] == [str(evalset.VP_RECORDER), "-o"]
+    assert [cmd[0] for cmd in started] == [built[0][-1]] * 2
+    assert (tmp_path / "02.wav").read_text() == "new"

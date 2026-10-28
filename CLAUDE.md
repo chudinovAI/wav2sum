@@ -6,12 +6,12 @@ A local Krisp + Wispr Flow for macOS: call recording with a transcript and a sum
 
 - Test: `uv run pytest --cov`
 - Lint: `uv run ruff check && uv run ruff format --check`
-- Typecheck Swift (macOS only): `swiftc -typecheck wav2sum/native/app/*.swift && swiftc -typecheck wav2sum/native/capture.swift && swiftc -typecheck wav2sum/native/app/Logo.swift wav2sum/native/icon/main.swift`
+- Typecheck Swift (macOS only): `swiftc -typecheck wav2sum/native/app/*.swift && swiftc -typecheck wav2sum/native/capture.swift && swiftc -typecheck wav2sum/native/vprecord.swift && swiftc -typecheck wav2sum/native/app/Logo.swift wav2sum/native/icon/main.swift`
 - Run: `uv run wav2sum app` (menu bar app and daemon), `uv run wav2sum tui`, `uv run wav2sum meeting.mp3`
 - Dictation latency from the history (read-only): `uv run python -m wav2sum.latency`
 - Dictation quality from the history (read-only): `uv run python -m wav2sum.quality`
 - Numbers and names in a fresh summary of the last 3 calls that their transcripts don't have (read-only): `uv run python -m wav2sum.factcheck [call folder ...]`; run it after a change to the summary prompt or model
-- Dictation WER on the recorded phrase set (read-only): `uv run python -m wav2sum.evalset`; record it with `uv run python -m wav2sum.evalset record quiet` (also `airpods`, `noise`, `whisper`)
+- Dictation WER on the recorded phrase set (read-only): `uv run python -m wav2sum.evalset`; record it with `uv run python -m wav2sum.evalset record quiet` (also `airpods`, `noise`, `whisper`; `--vp` records with Apple's voice processing, e.g. `--dir ~/wav2sum/evalset-vp record noise --vp`)
 - Convert the GigaAM encoder to Core ML (macOS only): `uv run --group coreml python -m wav2sum.coreml`
 
 CI (`.github/workflows/ci.yml`) runs ruff on Linux and the tests (with coverage, at least 80%) and the Swift typecheck on `macos-15`. The tests also pass on Linux.
