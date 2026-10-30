@@ -17,6 +17,17 @@ for dictation, `mlx-community/gemma-4-12B-it-qat-4bit` for summaries) and unload
 `wav2sum app` puts an icon in the menu bar and starts the background process. On first launch, allow Microphone,
 Accessibility, Input Monitoring, and System Audio Recording.
 
+If the app is already installed from this checkout, keep using its existing project environment:
+
+```fish
+uv run --offline --no-sync wav2sum app
+uv run --offline --no-sync wav2sum status
+```
+
+Run these commands from the repository. The app stores the Python interpreter path in its bundle; switching between
+this `.venv` and the global `uv tool` environment rebuilds the app. `status` only reads the background process state.
+Starting the app enables the configured call detection and model warmup, so use `status` when you only need to check it.
+
 ## Usage
 
 - **Dictation.** Hold right ⌥, speak, release, and the text is pasted at the cursor and stays on the clipboard; if you
