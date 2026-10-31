@@ -182,6 +182,51 @@ def test_one_person_found_in_a_range_keeps_the_plain_name(tmp_path, monkeypatch)
     assert [u.speaker for u in result.utterances] == ["Я", "Илья"]
 
 
+@pytest.mark.parametrize("speaker_id", [0, 2])
+def test_single_diarized_speaker_respects_names_even_when_using_cache(tmp_path, monkeypatch, speaker_id):
+    audio = _call(tmp_path, monkeypatch)
+    models = fake_models(turns=[Turn(speaker_id, 3.0, 5.0)])
+    speakers = Speakers(None, 2, 7)
+    kwargs = {"llm": None, "speakers": speakers}
+
+    first = process(audio, models, tmp_path / "output", names=Names("Я", "Илья"), **kwargs)
+    calls_before = models.asr["ru"].calls
+    second = process(audio, models, tmp_path / "output", names=Names("Я", "Илья", {speaker_id: "Алексей"}), **kwargs)
+    third = process(audio, models, tmp_path / "output", names=Names("Я", "Друг"), **kwargs)
+
+    assert [u.speaker for u in first.utterances] == ["Я", "Илья"]
+    assert [u.speaker for u in second.utterances] == ["Я", "Алексей"]
+    assert [u.speaker for u in third.utterances] == ["Я", "Друг"]
+    assert models.asr["ru"].calls == calls_before
+
+
+def test_multiple_diarized_speakers_in_a_range_remain_numbered(tmp_path, monkeypatch):
+    audio = _call(tmp_path, monkeypatch)
+    models = fake_models(turns=[Turn(0, 3.0, 4.0), Turn(1, 4.0, 5.0)])
+    result = process(audio, models, tmp_path / "output", llm=None, speakers=Speakers(None, 2, 7))
+    assert [u.speaker for u in result.utterances] == ["Я", "Собеседник 1", "Собеседник 2"]
+
+
+def test_single_speaker_cache_from_v8_is_recomputed(tmp_path, monkeypatch):
+    audio = _call(tmp_path, monkeypatch)
+    models = fake_models(turns=[Turn(0, 3.0, 5.0)])
+    output = tmp_path / "output"
+    kwargs = {"llm": None, "speakers": Speakers(None, 2, 7), "names": Names(diarized={0: "Алексей"})}
+    process(audio, models, output, **kwargs)
+    cached = next((output / ".cache").glob("*/utterances.json"))
+    payload = json.loads(cached.read_text())
+    payload["params"]["version"] = 8
+    for utterance in payload["utterances"]:
+        if utterance["speaker"].startswith("single-remote:"):
+            utterance["speaker"] = "them"
+    cached.write_text(json.dumps(payload))
+    before = models.asr["ru"].calls
+
+    result = process(audio, models, output, **kwargs)
+    assert [u.speaker for u in result.utterances] == ["Я", "Алексей"]
+    assert models.asr["ru"].calls > before
+
+
 def test_detected_language_picks_recognizer_and_summary_language(tmp_path, monkeypatch):
     audio = _call(tmp_path, monkeypatch, mine_amp=0.7, theirs_amp=0.9)
     models = fake_models(language="en")
