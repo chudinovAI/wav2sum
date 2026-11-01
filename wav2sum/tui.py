@@ -99,6 +99,7 @@ class Wav2SumTUI(App):
         Binding("r", "record", show=False),
         Binding("d", "daemon", show=False),
         Binding("o", "open", show=False),
+        Binding("p", "process", show=False),
         Binding("x,delete", "delete", show=False),
         Binding("slash", "search", show=False),
         Binding("escape", "clear_search", show=False),
@@ -112,6 +113,7 @@ class Wav2SumTUI(App):
         self.status: dict = {}
         self.levels = (-120.0, -120.0)
         self.dictations: list[dict] = []
+        self.raw_calls: set[str] = set()
         self.search_text = ""
 
     def compose(self) -> ComposeResult:
@@ -138,16 +140,50 @@ class Wav2SumTUI(App):
 
     def load_calls(self) -> None:
         table = self.query_one("#calls", DataTable)
-        table.clear()
+        selected = None
+        if table.row_count:
+            selected = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
         folders = [d for d in self.cfg.output_dir.glob("*") if (d / "meta.json").exists()]
-        for folder in sorted(folders, key=lambda d: d.stat().st_mtime, reverse=True):
-            if self.search_text and self.search_text not in _call_text(folder):
-                continue
-            meta = json.loads((folder / "meta.json").read_text(encoding="utf-8"))
-            speakers = ", ".join(meta.get("speakers", []))
-            table.add_row(
-                folder.name.removeprefix("call-"), _clock(meta.get("duration_sec", 0)), speakers, key=str(folder)
-            )
+        results = [(folder, json.loads((folder / "meta.json").read_text(encoding="utf-8"))) for folder in folders]
+        processed = {str(Path(meta["audio"]).resolve()): str(folder) for folder, meta in results if meta.get("audio")}
+        entries = [(folder, meta) for folder, meta in results]
+        entries.extend(
+            (audio, None) for audio in self.cfg.recordings_dir.glob("*.wav") if str(audio.resolve()) not in processed
+        )
+        table.clear()
+        self.raw_calls = set()
+        visible_keys = set()
+        for path, meta in sorted(entries, key=lambda entry: entry[0].stat().st_mtime, reverse=True):
+            if meta is None:
+                if self.search_text and self.search_text not in path.name.lower():
+                    continue
+                self.raw_calls.add(str(path))
+                job = self._recording_job(path)
+                table.add_row(path.stem.removeprefix("call-"), job["state"] if job else "raw", "", key=str(path))
+                visible_keys.add(str(path))
+            else:
+                if self.search_text and self.search_text not in _call_text(path):
+                    continue
+                speakers = ", ".join(meta.get("speakers", []))
+                table.add_row(
+                    path.name.removeprefix("call-"), _clock(meta.get("duration_sec", 0)), speakers, key=str(path)
+                )
+                visible_keys.add(str(path))
+        if selected:
+            selected = processed.get(str(Path(selected).resolve()), selected)
+            if selected in visible_keys:
+                table.move_cursor(row=table.get_row_index(selected))
+        if table.has_focus:
+            if table.row_count:
+                self.show_row(table, table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value)
+            else:
+                self.show("Details", "")
+
+    def _recording_job(self, path: Path) -> dict | None:
+        return next(
+            (job for job in reversed(self.status.get("jobs", [])) if Path(job["audio"]).resolve() == path.resolve()),
+            None,
+        )
 
     def load_dictations(self) -> None:
         self.dictations = load_dictations()
@@ -184,10 +220,18 @@ class Wav2SumTUI(App):
 
     def render_jobs(self) -> None:
         table = self.query_one("#jobs", DataTable)
+        selected = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value if table.row_count else None
         table.clear()
         for job in reversed(self.status.get("jobs", [])):
             state = {"queued": "queued", "done": "done", "failed": "failed"}.get(job["state"], job["stage"] or "…")
             table.add_row(Path(job["audio"]).stem.removeprefix("call-"), state, key=str(job["id"]))
+        if selected and any(str(job["id"]) == selected for job in self.status.get("jobs", [])):
+            table.move_cursor(row=table.get_row_index(selected))
+        if table.has_focus:
+            if table.row_count:
+                self.show_row(table, table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value)
+            else:
+                self.show("Details", "")
 
     @on(DataTable.RowHighlighted)
     def row_highlighted(self, event: DataTable.RowHighlighted) -> None:
@@ -197,7 +241,12 @@ class Wav2SumTUI(App):
     def show_row(self, table: DataTable, key: str) -> None:
         match table.id:
             case "calls":
-                self.show("Call", _call_markdown(Path(key)))
+                if key in self.raw_calls:
+                    job = self._recording_job(Path(key))
+                    state = job["state"] if job else "raw"
+                    self.show("Recording", f"# {Path(key).stem}\n\n**State:** {state}\n\nPress **p** to process.")
+                else:
+                    self.show("Call", _call_markdown(Path(key)))
             case "dictations":
                 self.show("Dictation", _dictation_markdown(self.dictations[int(key)]))
             case "jobs":
@@ -226,14 +275,19 @@ class Wav2SumTUI(App):
         while True:
             try:
                 self.client = await DaemonClient.connect()
-                self.status = await self.client.request("status")
+                # Subscribe returns an atomic snapshot. events() subscribes again, but the first
+                # subscription already queues every intervening event on this connection.
+                self.status = await self.client.request("subscribe")
                 self.render_jobs()
+                self.load_calls()
                 async for event in self.client.events():
                     self.handle(event)
             except DaemonError:
                 pass
             self.client = None
             self.status = {}
+            self.render_jobs()
+            self.load_calls()
             await asyncio.sleep(2)
 
     def handle(self, event: dict) -> None:
@@ -248,11 +302,12 @@ class Wav2SumTUI(App):
                 self.status["recording"] = {"path": event["path"], "seconds": 0} if event["active"] else None
                 if event["active"] and event.get("auto"):
                     self.notify(f"Recording {event['auto']} call; stops by itself when the call ends")
+                self.load_calls()
             case "job":
                 self.status["jobs"] = [j for j in self.status.get("jobs", []) if j["id"] != event["id"]] + [payload]
                 self.render_jobs()
+                self.load_calls()
                 if event["state"] == "done":
-                    self.load_calls()
                     self.notify(f"Summary ready: {Path(event['out_dir']).name}")
                 elif event["state"] == "failed":
                     self.notify(f"Processing failed: {event['error']}", severity="error")
@@ -283,6 +338,7 @@ class Wav2SumTUI(App):
         hints = [
             ("r", record),
             ("d", daemon),
+            ("p", "process recording"),
             ("o", "show in Finder"),
             ("x", "delete"),
             ("/", "search"),
@@ -300,6 +356,28 @@ class Wav2SumTUI(App):
             await self.client.request("record_stop" if self.status.get("recording") else "record_start")
         except DaemonError as e:
             self.notify(str(e), severity="error")
+
+    async def action_process(self) -> None:
+        table = self.focused
+        if not isinstance(table, ListPanel) or table.id != "calls" or not table.row_count:
+            return
+        key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
+        if key not in self.raw_calls:
+            self.notify("Select a raw recording to process", severity="warning")
+            return
+        if not self.client:
+            self.notify("The background process is not connected", severity="warning")
+            return
+        try:
+            result = await self.client.request("process", path=key)
+        except DaemonError as e:
+            self.notify(str(e), severity="error")
+            return
+        job = result["job"]
+        if not any(existing["id"] == job["id"] for existing in self.status.get("jobs", [])):
+            self.status["jobs"] = [*self.status.get("jobs", []), job]
+            self.render_jobs()
+            self.load_calls()
 
     async def action_daemon(self) -> None:
         wanted = self.client is None
@@ -325,6 +403,9 @@ class Wav2SumTUI(App):
         if not isinstance(table, ListPanel) or table.id not in ("calls", "dictations") or not table.row_count:
             return
         key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
+        if table.id == "calls" and key in self.raw_calls:
+            self.notify("Raw recordings cannot be deleted here", severity="warning")
+            return
         where = "to the Trash" if CAN_TRASH else "permanently"
         if table.id == "calls":
             question = f"Move call [b]{Path(key).name}[/] {where}? Its recording goes too if wav2sum made it."
@@ -354,7 +435,9 @@ class Wav2SumTUI(App):
     def action_open(self) -> None:
         table = self.query_one("#calls", DataTable)
         if table.row_count:
-            subprocess.run(["open", table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value], check=False)
+            key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
+            if key not in self.raw_calls:
+                subprocess.run(["open", key], check=False)
 
 
 def _call_markdown(folder: Path) -> str:
@@ -389,7 +472,7 @@ def _dictation_markdown(entry: dict) -> str:
 
 
 def _job_markdown(job: dict) -> str:
-    lines = [f"# {Path(job['audio']).name}", f"**State:** {job['state']} {job['stage']}", f"`{job['audio']}`"]
+    lines = [f"# {Path(job['audio']).name}", f"**State:** {job['state']} {job['stage']}"]
     if job.get("out_dir"):
         lines.append(f"**Output:** `{job['out_dir']}`")
     if job.get("error"):

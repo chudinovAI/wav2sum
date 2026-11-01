@@ -37,14 +37,21 @@ Starting the app enables the configured call detection and model warmup, so use 
 - **Dictate in English.** Hold ⌃ + right ⌥ and speak Russian or English; clean English text is pasted at the cursor.
   If the local LLM fails, nothing is pasted and you hear a beep.
 - **Calls.** Recording starts by itself when Zoom, Teams, or Webex takes the microphone and stops once the call ends.
-  To record anything else, choose "Record Call" in the menu bar, then "Stop Recording". The transcript and summary
-  show up in `~/wav2sum/output/`.
+  To record anything else, choose "Record Call" in the menu bar, then "Stop Recording". Recordings are saved
+  automatically; stopping a recording or starting the background process does not enqueue processing. To create a
+  transcript and summary, run `wav2sum tui`, select the raw recording in Calls and press `p`. Results appear in
+  `~/wav2sum/output/`.
+  The daemon rejects processing an active or finalizing recording, a duplicate queued or running job, ambiguous
+  recordings with the same filename stem, or an existing output directory, including partial output. These safeguards
+  apply to daemon requests, not direct CLI processing outside the daemon.
+  If capture fails while stopping, the daemon clears the recording state and leaves any partial WAV in place.
 - **Learning from edits.** If you fix a term or a name right after pasting a dictation ("гитхаб" → "GitHub"), wav2sum remembers
   it and writes it that way next time. Learned words live in `~/Library/Application Support/wav2sum/vocabulary.json`.
 - **Language.** Each call and each dictation is checked for Russian or English. Russian goes to GigaAM, English to
   Parakeet, and the summary and the cleanup are written in the same language. Set `language = "ru"` or `"en"` to
   skip the check.
-- **History and summaries.** Run `wav2sum tui`. Press `x` on a call or a dictation to delete it; calls go to the Trash.
+- **History and summaries.** Run `wav2sum tui`. Press `x` on a processed call or a dictation to delete it; calls go to
+  the Trash. Raw recordings cannot be deleted from the TUI.
 - **An existing file.** Run `wav2sum meeting.mp3`.
 
 ## Config

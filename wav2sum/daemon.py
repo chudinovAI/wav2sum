@@ -17,7 +17,7 @@ from wav2sum import __version__
 from wav2sum.audio import pcm16_to_float
 from wav2sum.autorecord import CallDetector, watch_inputs
 from wav2sum.calls import Names, Speakers, process
-from wav2sum.capture import CallRecorder, Level, new_recording_path
+from wav2sum.capture import CallRecorder, CaptureError, Level, new_recording_path
 from wav2sum.config import (
     EDITS_PATH,
     HISTORY_PATH,
@@ -91,7 +91,6 @@ class Daemon:
             self.loop.add_signal_handler(sig, self.stopping.set)
         logger.info("wav2sum %s daemon on %s (pid %d)", __version__, SOCKET_PATH, os.getpid())
 
-        self._enqueue_unprocessed()
         tasks = [asyncio.create_task(self._warm_up()), asyncio.create_task(self._work())]
         if self.cfg.auto_record:
             tasks.append(asyncio.create_task(self._watch_calls()))
@@ -252,8 +251,12 @@ class Daemon:
                 raise RuntimeError("already recording")
             path = new_recording_path(self.cfg.recordings_dir)
             recorder = CallRecorder(path, self.cfg.mic, on_level=self._on_level, app=auto)
-            await asyncio.to_thread(recorder.start)
             self.recorder, self.auto_app = recorder, auto
+            try:
+                await asyncio.to_thread(recorder.start)
+            except BaseException:
+                self.recorder, self.auto_app = None, None
+                raise
         logger.info("Recording %s%s", recorder.path, f" ({auto} call)" if auto else "")
         self._broadcast({"event": "recording", "active": True, "path": str(recorder.path), "auto": auto})
         return {"path": str(recorder.path)}
@@ -262,10 +265,16 @@ class Daemon:
         async with self.recording_lock:
             if not self.recorder:
                 raise RuntimeError("not recording")
-            recorder, self.recorder, self.auto_app = self.recorder, None, None
-            path = await asyncio.to_thread(recorder.stop)
+            recorder = self.recorder
+            try:
+                path = await asyncio.to_thread(recorder.stop)
+            except CaptureError:
+                self.recorder, self.auto_app = None, None
+                self._broadcast({"event": "recording", "active": False, "path": str(recorder.path)})
+                raise
+            self.recorder, self.auto_app = None, None
         self._broadcast({"event": "recording", "active": False, "path": str(path)})
-        return {"path": str(path), "job": asdict(self._enqueue(path))}
+        return {"path": str(path)}
 
     def _on_level(self, level: Level) -> None:
         event = {"event": "level", "seconds": level.seconds, "mic_db": level.mic_db, "sys_db": level.sys_db}
@@ -311,26 +320,41 @@ class Daemon:
         self._broadcast({"event": "state", "state": "ready"})
 
     def _enqueue(self, audio: Path) -> Job:
-        if not audio.exists():
-            raise FileNotFoundError(audio)
+        self._validate_processing(audio)
         job = Job(next(self.job_ids), str(audio))
         self.jobs.append(job)
         self.queue.put_nowait(job)
         self._broadcast({"event": "job", **asdict(job)})
         return job
 
-    def _enqueue_unprocessed(self) -> None:
-        """Queues recordings left without a result by a crash or a restart."""
-        for audio in sorted(self.cfg.recordings_dir.glob("*.wav")):
-            if not (self.cfg.output_dir / audio.stem).exists():
-                self._enqueue(audio)
+    def _validate_processing(self, audio: Path, *, current: Job | None = None) -> None:
+        if not audio.is_file():
+            raise FileNotFoundError(audio)
+        resolved = audio.resolve()
+        if self.recorder and (self.recorder.path.stem == audio.stem or self.recorder.path.resolve() == resolved):
+            raise ValueError("Recording is active or still finishing")
+        if os.path.lexists(self.cfg.output_dir / audio.stem):
+            raise ValueError(f"Output already exists for {audio.stem}")
+        for recording in self.cfg.recordings_dir.glob("*.wav"):
+            if recording.stem == audio.stem and recording.resolve() != resolved:
+                raise ValueError(f"Ambiguous recording stem: {audio.stem}")
+        for job in self.jobs:
+            if job is current:
+                continue
+            previous = Path(job.audio)
+            if previous.resolve() == resolved:
+                if previous.stem != audio.stem or job.state in ("queued", "running"):
+                    raise ValueError(f"Already queued or ambiguous processing path: {audio}")
+            elif previous.stem == audio.stem:
+                raise ValueError(f"Ambiguous processing stem: {audio.stem}")
 
     async def _work(self) -> None:
         while True:
             job = await self.queue.get()
             await self.ready.wait()
-            self._update(job, state="running")
             try:
+                self._validate_processing(Path(job.audio), current=job)
+                self._update(job, state="running")
                 result = await asyncio.to_thread(
                     process,
                     Path(job.audio),

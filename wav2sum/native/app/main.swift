@@ -208,8 +208,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     }
 
     @objc private func toggleRecording() {
-        daemon.request(isRecording ? "record_stop" : "record_start") { [weak self] reply in
-            if let error = reply["error"] as? String { self?.notify(title: "Recording", body: error) }
+        let stopping = isRecording
+        daemon.request(stopping ? "record_stop" : "record_start") { [weak self] reply in
+            if let error = reply["error"] as? String {
+                self?.notify(title: "Recording", body: error)
+            } else if stopping, let path = reply["path"] as? String {
+                self?.notify(title: "Recording saved", body: path)
+            }
         }
     }
 
