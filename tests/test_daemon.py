@@ -11,6 +11,8 @@ import pytest
 
 from wav2sum import daemon
 from wav2sum.autorecord import CallDetector
+from wav2sum.calls import Speakers
+from wav2sum.capture import CaptureError
 from wav2sum.client import DaemonClient, DaemonError
 from wav2sum.config import Config
 from wav2sum.dictation import Dictation
@@ -64,7 +66,9 @@ def test_call_is_recorded_from_start_to_end(tmp_path, monkeypatch):
         await inputs.put([])
         await asyncio.sleep(0.4)
         assert d.recorder is None
-        assert [j.state for j in d.jobs] == ["queued"]
+        assert d.jobs == []
+        assert d.queue.empty()
+        assert len(list(tmp_path.glob("*.wav"))) == 1
         watching.cancel()
 
     asyncio.run(scenario())
@@ -167,8 +171,10 @@ def test_client_talks_to_daemon_over_the_socket(tmp_path, monkeypatch, socket_pa
             with pytest.raises(DaemonError, match="already recording"):
                 await connected.request("record_start")
             stopped = await connected.request("record_stop")
-            assert stopped["job"]["state"] == "queued"
+            assert set(stopped) == {"path"}
             assert Path(stopped["path"]).parent == tmp_path
+            assert Path(stopped["path"]).exists()
+            assert (await connected.request("status"))["jobs"] == []
 
     asyncio.run(scenario())
 
@@ -274,15 +280,172 @@ def test_processing_a_missing_file_fails_and_an_existing_one_is_queued(tmp_path,
     asyncio.run(scenario())
 
 
-def test_recordings_without_a_result_are_queued_at_start(tmp_path, monkeypatch):
+def test_recordings_without_a_result_are_not_queued_at_start(tmp_path, monkeypatch, socket_path):
     async def scenario():
         d = _daemon(tmp_path, monkeypatch, asyncio.Queue())
-        for name in ("call-1.wav", "call-2.wav", "call-2.json"):
-            (tmp_path / name).write_bytes(b"")
-        (tmp_path / "output" / "call-1").mkdir(parents=True)
-        d._enqueue_unprocessed()
-        assert [j.audio for j in d.jobs] == [str(tmp_path / "call-2.wav")]
-        assert d.queue.qsize() == 1
+        d.cfg.auto_record = False
+        audio = tmp_path / "call-2.wav"
+        audio.write_bytes(b"saved audio")
+        output = tmp_path / "output" / "call-1"
+        output.mkdir(parents=True)
+        sentinel = output / "summary.md"
+        sentinel.write_text("existing result")
+
+        async def not_running():
+            return False
+
+        async def warm():
+            d.ready.set()
+
+        monkeypatch.setattr(daemon, "is_running", not_running)
+        monkeypatch.setattr(d, "_warm_up", warm)
+        monkeypatch.setattr(daemon, "SOCKET_PATH", socket_path)
+        monkeypatch.setattr(d.dictator.llm, "unload", lambda: None)
+        running = asyncio.create_task(d.run())
+        while not hasattr(d, "stopping"):
+            await asyncio.sleep(0)
+        while not socket_path.exists():
+            await asyncio.sleep(0.01)
+        assert d.jobs == [] and d.queue.empty()
+        assert audio.read_bytes() == b"saved audio"
+        assert sentinel.read_text() == "existing result"
+        d.stopping.set()
+        await running
+
+    asyncio.run(scenario())
+
+
+def test_process_rejects_duplicate_jobs_and_occupied_output(tmp_path, monkeypatch):
+    async def scenario():
+        d = _daemon(tmp_path, monkeypatch, asyncio.Queue())
+        audio = tmp_path / "meeting.wav"
+        audio.write_bytes(b"audio")
+        job = (await d._handle({"cmd": "process", "path": str(audio)}, None))["job"]
+        assert job["state"] == "queued"
+        with pytest.raises(ValueError, match=r"(?i)(already|queued|processing)"):
+            await d._handle({"cmd": "process", "path": str(audio)}, None)
+        d.jobs[0].state = "running"
+        with pytest.raises(ValueError, match=r"(?i)(already|processing)"):
+            await d._handle({"cmd": "process", "path": str(audio)}, None)
+        alias = tmp_path / "alias.wav"
+        alias.symlink_to(audio)
+        with pytest.raises(ValueError, match=r"(?i)(already|ambiguous)"):
+            await d._handle({"cmd": "process", "path": str(alias)}, None)
+        other = tmp_path / "elsewhere" / "meeting.wav"
+        other.parent.mkdir()
+        other.write_bytes(b"other")
+        with pytest.raises(ValueError, match=r"(?i)(stem|already|processing)"):
+            await d._handle({"cmd": "process", "path": str(other)}, None)
+        d.jobs[0].state = "failed"
+        output = tmp_path / "output" / "meeting"
+        output.mkdir(parents=True)
+        sentinel = output / "partial.txt"
+        sentinel.write_text("keep")
+        with pytest.raises(ValueError, match=r"(?i)(output|result|exist)"):
+            await d._handle({"cmd": "process", "path": str(audio)}, None)
+        assert sentinel.read_text() == "keep"
+        assert len(d.jobs) == 1
+
+    asyncio.run(scenario())
+
+
+def test_process_rejects_another_recording_with_the_same_stem(tmp_path, monkeypatch):
+    async def scenario():
+        d = _daemon(tmp_path, monkeypatch, asyncio.Queue())
+        (tmp_path / "meeting.wav").write_bytes(b"recording")
+        other = tmp_path / "elsewhere" / "meeting.mp3"
+        other.parent.mkdir()
+        other.write_bytes(b"different recording")
+        with pytest.raises(ValueError, match=r"(?i)(stem|ambiguous)"):
+            await d._handle({"cmd": "process", "path": str(other)}, None)
+        assert d.jobs == []
+
+    asyncio.run(scenario())
+
+
+def test_process_rejects_active_and_finalizing_recording(tmp_path, monkeypatch):
+    entered, release = threading.Event(), threading.Event()
+
+    class SlowRecorder(FakeRecorder):
+        def stop(self):
+            entered.set()
+            assert release.wait(5)
+            return super().stop()
+
+    monkeypatch.setattr(daemon, "CallRecorder", SlowRecorder)
+
+    async def scenario():
+        d = _daemon(tmp_path, monkeypatch, asyncio.Queue())
+        monkeypatch.setattr(daemon, "CallRecorder", SlowRecorder)
+        path = Path((await d._record_start())["path"])
+        path.write_bytes(b"partial")
+        with pytest.raises(ValueError, match=r"(?i)record"):
+            await d._handle({"cmd": "process", "path": str(path)}, None)
+        stopping = asyncio.create_task(d._record_stop())
+        while not entered.is_set():
+            await asyncio.sleep(0.01)
+        try:
+            with pytest.raises(ValueError, match=r"(?i)record"):
+                await d._handle({"cmd": "process", "path": str(path)}, None)
+        finally:
+            release.set()
+            await stopping
+        assert d.jobs == []
+        assert path.exists()
+
+    asyncio.run(scenario())
+
+
+def test_failed_stop_clears_recording_and_preserves_audio(tmp_path, monkeypatch):
+    class FailedRecorder(FakeRecorder):
+        def stop(self):
+            self.path.write_bytes(b"partial audio")
+            raise CaptureError("capture failed")
+
+    async def scenario():
+        d = _daemon(tmp_path, monkeypatch, asyncio.Queue())
+        monkeypatch.setattr(daemon, "CallRecorder", FailedRecorder)
+        events = []
+        monkeypatch.setattr(d, "_broadcast", events.append)
+        path = Path((await d._record_start(auto=ZOOM))["path"])
+
+        with pytest.raises(CaptureError, match="capture failed"):
+            await d._record_stop()
+
+        assert d.status()["recording"] is None
+        assert events[-1] == {"event": "recording", "active": False, "path": str(path)}
+        assert path.read_bytes() == b"partial audio"
+        assert d.queue.empty()
+        await d._record_start()
+        assert d.status()["recording"] is not None
+
+    asyncio.run(scenario())
+
+
+def test_worker_rechecks_output_before_processing(tmp_path, monkeypatch):
+    called = []
+    monkeypatch.setattr(daemon, "process", lambda *a, **kw: called.append(a))
+
+    async def scenario():
+        d = _daemon(tmp_path, monkeypatch, asyncio.Queue())
+        monkeypatch.setattr(d.models, "unload", lambda *_: None)
+        audio = tmp_path / "meeting.wav"
+        audio.write_bytes(b"audio")
+        d._enqueue(audio)
+        output = tmp_path / "output" / audio.stem
+        output.mkdir(parents=True)
+        sentinel = output / "summary.md"
+        sentinel.write_text("preserve me")
+        d.ready.set()
+        worker = asyncio.create_task(d._work())
+        for _ in range(100):
+            if d.jobs[0].state == "failed":
+                break
+            await asyncio.sleep(0.01)
+        worker.cancel()
+        assert d.jobs[0].state == "failed"
+        assert called == []
+        assert sentinel.read_text() == "preserve me"
 
     asyncio.run(scenario())
 
@@ -300,7 +463,7 @@ def test_jobs_run_after_models_load_and_report_failures(tmp_path, monkeypatch):
         d = _daemon(tmp_path, monkeypatch, asyncio.Queue())
         for name in ("good.wav", "broken.wav"):
             (tmp_path / name).write_bytes(b"")
-            d._enqueue(tmp_path / name)
+            await d._handle({"cmd": "process", "path": str(tmp_path / name)}, None)
         working = asyncio.create_task(d._work())
         await asyncio.sleep(0.05)
         assert [j.state for j in d.jobs] == ["queued", "queued"]
@@ -310,6 +473,28 @@ def test_jobs_run_after_models_load_and_report_failures(tmp_path, monkeypatch):
         good, broken = d.jobs
         assert (good.state, good.out_dir) == ("done", str(tmp_path / "output" / "good"))
         assert (broken.state, broken.error) == ("failed", "ffmpeg failed")
+        working.cancel()
+
+    asyncio.run(scenario())
+
+
+def test_recordings_are_diarized_with_a_range_of_people_on_the_system_channel(tmp_path, monkeypatch):
+    passed = []
+
+    def fake_process(audio, models, out_root, **kwargs):
+        passed.append(kwargs["speakers"])
+        return type("Result", (), {"out_dir": out_root / audio.stem})()
+
+    monkeypatch.setattr(daemon, "process", fake_process)
+
+    async def scenario():
+        d = _daemon(tmp_path, monkeypatch, asyncio.Queue())
+        (tmp_path / "call.wav").write_bytes(b"")
+        d._enqueue(tmp_path / "call.wav")
+        d.ready.set()
+        working = asyncio.create_task(d._work())
+        await asyncio.sleep(0.2)
+        assert [s.without_me() for s in passed] == [Speakers(None, 1, 6)]
         working.cancel()
 
     asyncio.run(scenario())

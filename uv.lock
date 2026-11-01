@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.11, <3.13"
 resolution-markers = [
     "python_full_version >= '3.12' and sys_platform == 'win32'",
@@ -1926,6 +1926,18 @@ wheels = [
 ]
 
 [[package]]
+name = "pydeps"
+version = "3.0.9"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "stdlib-list" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/b5/0e/0c4570012b268fa86ab72c53603b02fdc2e951f997a0ca36f12741b82d07/pydeps-3.0.9.tar.gz", hash = "sha256:5b54d3854a3b40eaf19ad1dbcc273260e57e362a4396ad0a3ed6ea87a4e48649", size = 60477, upload-time = "2026-10-01T16:15:27.717Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fb/95/f7698fdd996137e29f8c68a2820e09c166eea5df68518800fbed90888282/pydeps-3.0.9-py3-none-any.whl", hash = "sha256:abde61b121876335a143296b0ff0fc2953d4f06d0bef5a3a00aa892c11f06451", size = 50545, upload-time = "2026-10-01T16:15:26.652Z" },
+]
+
+[[package]]
 name = "pygments"
 version = "2.20.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2438,6 +2450,15 @@ wheels = [
 ]
 
 [[package]]
+name = "stdlib-list"
+version = "0.12.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/8c/25/f1540879c8815387980e56f973e54605bd924612399ace31487f7444171c/stdlib_list-0.12.0.tar.gz", hash = "sha256:517824f27ee89e591d8ae7c1dd9ff34f672eae50ee886ea31bb8816d77535675", size = 60923, upload-time = "2025-10-24T19:21:22.849Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3b/3d/2970b27a11ae17fb2d353e7a179763a2fe6f37d6d2a9f4d40104a2f132e9/stdlib_list-0.12.0-py3-none-any.whl", hash = "sha256:df2d11e97f53812a1756fb5510393a11e3b389ebd9239dc831c7f349957f62f2", size = 87615, upload-time = "2025-10-24T19:21:20.619Z" },
+]
+
+[[package]]
 name = "sympy"
 version = "1.14.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2728,6 +2749,7 @@ coreml = [
     { name = "coremltools" },
 ]
 dev = [
+    { name = "pydeps" },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "pytest-timeout" },
@@ -2755,6 +2777,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 coreml = [{ name = "coremltools", specifier = ">=9.0" }]
 dev = [
+    { name = "pydeps", specifier = ">=3.0.9" },
     { name = "pytest", specifier = ">=9.1.1" },
     { name = "pytest-cov", specifier = ">=7.1.0" },
     { name = "pytest-timeout", specifier = ">=2.4.0" },

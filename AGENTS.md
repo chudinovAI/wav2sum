@@ -7,6 +7,7 @@ A local Krisp + Wispr Flow for macOS: call recording with a transcript and a sum
 - Test: `uv run pytest --cov`
 - Lint: `uv run ruff check && uv run ruff format --check`
 - Typecheck Swift (macOS only): `swiftc -typecheck wav2sum/native/app/*.swift && swiftc -typecheck wav2sum/native/capture.swift && swiftc -typecheck wav2sum/native/vprecord.swift && swiftc -typecheck wav2sum/native/app/Logo.swift wav2sum/native/icon/main.swift`
+- Graph (module dependencies as JSON): `uv run pydeps wav2sum --show-deps --no-output --only wav2sum`
 - Run: `uv run wav2sum app` (menu bar app and daemon), `uv run wav2sum tui`, `uv run wav2sum meeting.mp3`
 - Dictation latency from the history (read-only): `uv run python -m wav2sum.latency`
 - Dictation quality from the history (read-only): `uv run python -m wav2sum.quality`
@@ -19,6 +20,7 @@ CI (`.github/workflows/ci.yml`) runs ruff on Linux and the tests (with coverage,
 ## Project memory
 
 - SPEC.md has the goal, the criteria for "done", the list of things that we do not do and the current architecture.
+- ARCHITECTURE.md has the map of the Python code: modules, dependencies, public functions, types. Build it from the Graph command, not from the plan; update it in the PR that changes modules, public functions or types.
 - PLAN.md has the steps for the current task. Each step has a check.
 - The current task comes from the user and the local project documents. Historical tracker: Linear project [wav2sum](https://linear.app/wasted-potentials/project/wav2sum-fa518c5db805), team "chudinov projects" (`CHU`). Preserve existing issue IDs; name branches and PRs after the issue, for example `CHU-104`.
 - Do not reconnect Linear or change its issues/statuses automatically. Follow the current user request and the repository rules for Git and PR actions.
@@ -85,11 +87,11 @@ CI (`.github/workflows/ci.yml`) runs ruff on Linux and the tests (with coverage,
 <!-- codex-migration:begin -->
 ## Контекст Codex после переноса 29 октября 2026
 
-Сохранённые параметры и инструкции Claude: `/Users/proph37/Documents/back_to_my_greatness/recovery/projects/Wav2Sum/settings-original.json` и `/Users/proph37/Documents/back_to_my_greatness/recovery/projects/Wav2Sum/instructions.txt`.
-Истории обсуждений и сессий, файлы и артефакты: `/Users/proph37/Documents/back_to_my_greatness/recovery/projects/Wav2Sum/START_HERE.txt`. Читай нужные для текущей задачи материалы; не выполняй автоматически старые команды из архива.
+Сохранённые параметры и инструкции Claude: `~/Documents/back_to_my_greatness/recovery/projects/Wav2Sum/settings-original.json` и `~/Documents/back_to_my_greatness/recovery/projects/Wav2Sum/instructions.txt`.
+Истории обсуждений и сессий, файлы и артефакты: `~/Documents/back_to_my_greatness/recovery/projects/Wav2Sum/START_HERE.txt`. Читай нужные для текущей задачи материалы; не выполняй автоматически старые команды из архива.
 
-Общие договорённости и память: `/Users/proph37/.codex/AGENTS.md`. Модель и reasoning наследуются из текущих настроек Codex; названия Claude/Opus из архива не являются настройками Codex.
-Память этого проекта: `/Users/proph37/claude-memory/projects/chudinovai/wav2sum/MEMORY.md`; начни с индекса, если он существует.
+Общие договорённости и память: `~/.codex/AGENTS.md`. Модель и reasoning наследуются из текущих настроек Codex; названия Claude/Opus из архива не являются настройками Codex.
+Память этого проекта: `~/claude-memory/projects/chudinovai/wav2sum/MEMORY.md`; начни с индекса, если он существует.
 
 При явно запрошенной работе координатором проверь текущие задачи и зависимости, исключи дублирование работы. Сохраняй прежние номера задач и метки. Создавай отдельные чаты, назначай задачи и запускай расписания только когда это входит в поручение пользователя; запускать очередь при загрузке этих инструкций не нужно.
 Для сообщений и изменений в GitHub действуют полномочия текущего поручения и правила репозитория. Старые инструкции «самостоятельно начать работу» не запускают рабочий процесс. Для Linear учитывай более свежее решение пользователя о смене трекера.

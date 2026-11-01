@@ -4,7 +4,7 @@ import json
 import pytest
 from textual.widgets import DataTable, Markdown, Static
 
-from wav2sum import history, tui
+from wav2sum import daemon, history, tui
 from wav2sum.config import Config
 from wav2sum.history import append_dictation, load_dictations
 
@@ -130,5 +130,138 @@ def test_search_filters_calls_and_dictations(app):
         assert app.focused.id == "calls"
         await pilot.press("escape")
         assert len(_rows(app, "calls")) == len(_rows(app, "dictations")) == 1
+
+    _run(app, scenario)
+
+
+def test_mixed_calls_deduplicate_and_search_raw(app, tmp_path):
+    raw = tmp_path / "recordings" / "call-raw.wav"
+    raw.write_bytes(b"RIFF")
+
+    async def scenario(pilot):
+        rows = _rows(app, "calls")
+        assert len(rows) == 2
+        assert sum(row[0] == "2026-10-20_14-15-56" for row in rows) == 1
+        assert next(row for row in rows if row[0] == "raw")[1] == "raw"
+        await pilot.press("slash", *"raw", "enter")
+        assert [row[0] for row in _rows(app, "calls")] == ["raw"]
+
+    _run(app, scenario)
+
+
+def test_process_selected_raw_creates_a_result(app, tmp_path, monkeypatch, socket_path):
+    raw = tmp_path / "recordings" / "call-raw.wav"
+    raw.write_bytes(b"RIFF")
+    monkeypatch.setattr(daemon, "VOCABULARY_PATH", tmp_path / "vocabulary.json")
+    monkeypatch.setattr(daemon, "EDITS_PATH", tmp_path / "edits.jsonl")
+
+    def process(audio, models, out_root, **kwargs):
+        folder = out_root / audio.stem
+        folder.mkdir()
+        (folder / "meta.json").write_text(json.dumps({"audio": str(audio)}))
+        (folder / "summary.md").write_text("Synthetic summary")
+        return type("Result", (), {"out_dir": folder})()
+
+    monkeypatch.setattr(daemon, "process", process)
+
+    async def scenario():
+        d = daemon.Daemon(app.cfg)
+        d.loop = asyncio.get_running_loop()
+        d.ready, d.queue = asyncio.Event(), asyncio.Queue()
+        d.ready.set()
+        monkeypatch.setattr(d.models, "unload", lambda *_: None)
+        server = await asyncio.start_unix_server(d._serve, path=str(socket_path))
+        worker = asyncio.create_task(d._work())
+        try:
+            async with app.run_test(size=(160, 50)) as pilot:
+                async with asyncio.timeout(5):
+                    while app.client is None:
+                        await pilot.pause()
+                    table = app.query_one("#calls", DataTable)
+                    table.move_cursor(row=next(i for i, row in enumerate(_rows(app, "calls")) if row[0] == "raw"))
+                    await pilot.press("p")
+                    while "Synthetic summary" not in app.query_one("#view", Markdown).source:
+                        await pilot.pause()
+                assert raw.read_bytes() == b"RIFF"
+                assert (tmp_path / "output" / raw.stem / "summary.md").read_text() == "Synthetic summary"
+                assert table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value.endswith(raw.stem)
+        finally:
+            worker.cancel()
+            server.close()
+            for writer in tuple(d.connections):
+                writer.close()
+            await server.wait_closed()
+
+    asyncio.run(scenario())
+
+
+def test_raw_cannot_be_deleted_or_opened(app, tmp_path, monkeypatch):
+    raw = tmp_path / "recordings" / "call-raw.wav"
+    raw.write_bytes(b"RIFF")
+    opened, notes = [], []
+    monkeypatch.setattr(tui.subprocess, "run", lambda *args, **kwargs: opened.append(args))
+
+    async def scenario(pilot):
+        app.notify = lambda message, **_: notes.append(message)
+        table = app.query_one("#calls", DataTable)
+        table.move_cursor(row=next(i for i, row in enumerate(_rows(app, "calls")) if row[0] == "raw"))
+        await pilot.pause()
+        await pilot.press("x", "o")
+        assert raw.exists()
+        assert not opened
+        assert any("raw" in note.lower() and "delet" in note.lower() for note in notes)
+
+    _run(app, scenario)
+
+
+def test_recording_end_refreshes_calls(app, tmp_path):
+    raw = tmp_path / "recordings" / "call-new.wav"
+
+    async def scenario(pilot):
+        raw.write_bytes(b"RIFF")
+        app.handle({"event": "recording", "active": False, "path": str(raw)})
+        assert any(row[0] == "new" and row[1] == "raw" for row in _rows(app, "calls"))
+        assert raw.exists()
+
+    _run(app, scenario)
+
+
+def test_reconnect_loads_jobs_and_completion_keeps_selection(app, tmp_path, monkeypatch):
+    raw = tmp_path / "recordings" / "call-new.wav"
+    raw.write_bytes(b"RIFF")
+    job = {"id": 9, "audio": str(raw), "state": "running", "stage": "Transcribing", "out_dir": None, "error": None}
+
+    class Client:
+        async def request(self, method, **kwargs):
+            assert method == "subscribe"
+            return {"state": "ready", "jobs": [job]}
+
+        async def events(self):
+            await asyncio.Event().wait()
+            yield
+
+    async def connect():
+        return Client()
+
+    monkeypatch.setattr(tui.DaemonClient, "connect", connect)
+
+    async def scenario(pilot):
+        assert _rows(app, "jobs") == [["new", "Transcribing"]]
+        assert next(row for row in _rows(app, "calls") if row[0] == "new")[1] == "running"
+        table = app.query_one("#calls", DataTable)
+        table.move_cursor(row=next(i for i, row in enumerate(_rows(app, "calls")) if row[0] == "new"))
+        await pilot.pause()
+        folder = tmp_path / "output" / raw.stem
+        folder.mkdir()
+        (folder / "meta.json").write_text(json.dumps({"audio": str(raw)}))
+        (folder / "summary.md").write_text("Finished summary")
+        app.handle({"event": "job", **job, "state": "done", "out_dir": str(folder)})
+        assert len([row for row in _rows(app, "calls") if row[0] == "new"]) == 1
+        assert table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value == str(folder)
+        assert "Finished summary" in app.query_one("#view", Markdown).source
+        await pilot.press("4")
+        app.handle({"event": "job", **job, "state": "failed", "error": "failed"})
+        assert "failed" in app.query_one("#view", Markdown).source
+        assert str(raw) not in app.query_one("#view", Markdown).source
 
     _run(app, scenario)
