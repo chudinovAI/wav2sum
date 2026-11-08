@@ -213,8 +213,13 @@ def _load(name: str) -> tuple:
         import mlx.core as mx
         from mlx_lm import load
 
+        from wav2sum.local_models import CLEANUP_FILES, CLEANUP_MODEL, CLEANUP_REVISION, snapshot_path
+
+        prepared = snapshot_path(CLEANUP_MODEL, CLEANUP_REVISION, CLEANUP_FILES) if name == CLEANUP_MODEL else None
+        if name == CLEANUP_MODEL and prepared is None:
+            raise RuntimeError("Local cleanup model is not prepared; use the app's Prepare models action.")
         logger.info("Loading %s …", name)
-        model, tokenizer = load(name)
+        model, tokenizer = load(str(prepared) if prepared else name)
         mx.eval(model.parameters())
         _loaded[name] = model, tokenizer
     return _loaded[name]

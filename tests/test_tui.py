@@ -58,6 +58,117 @@ def test_lists_calls_and_dictations_and_shows_a_call(app):
     _run(app, scenario)
 
 
+def test_status_shows_requested_mode(app):
+    app.cfg.cloud = True
+
+    async def scenario(pilot):
+        app.refresh_status()
+        assert "cloud" in str(app.query_one("#status", Static).render()).lower()
+
+    _run(app, scenario)
+
+
+def test_client_transmits_mode_on_process_and_cannot_override_it(socket_path):
+    from wav2sum import client
+
+    async def scenario():
+        requests = []
+
+        async def serve(reader, writer):
+            request = json.loads(await reader.readline())
+            requests.append(request)
+            writer.write((json.dumps({"id": request["id"], "ok": False, "error": "mode mismatch"}) + "\n").encode())
+            await writer.drain()
+            writer.close()
+
+        server = await asyncio.start_unix_server(serve, str(socket_path))
+        try:
+            c = await client.DaemonClient.connect(cloud=True)
+            try:
+                with pytest.raises(client.DaemonError, match="mode mismatch"):
+                    await c.request("process", path="synthetic.wav", cloud=False)
+            finally:
+                await c.close()
+        finally:
+            server.close()
+            await server.wait_closed()
+        assert requests[0]["cloud"] is True
+
+    asyncio.run(scenario())
+
+
+def test_local_tui_rejects_cloud_daemon_without_processing(app, socket_path):
+
+    async def scenario():
+        requests = []
+
+        async def serve(reader, writer):
+            request = json.loads(await reader.readline())
+            requests.append(request)
+            writer.write((json.dumps({"id": request["id"], "ok": False, "error": "mode mismatch"}) + "\n").encode())
+            await writer.drain()
+            await reader.read()
+            writer.close()
+
+        server = await asyncio.start_unix_server(serve, str(socket_path))
+        try:
+            async with app.run_test(size=(160, 50)) as pilot:
+                async with asyncio.timeout(5):
+                    while app.connection_error is None:
+                        await pilot.pause()
+                app.refresh_status()
+                assert "mode mismatch" in str(app.query_one("#status", Static).render())
+                await app.action_process()
+                await app.action_daemon()
+                assert [(r["cmd"], r["cloud"]) for r in requests] == [("subscribe", False)]
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    asyncio.run(scenario())
+
+
+def test_cloud_tui_processes_only_with_explicit_mode(app, socket_path):
+
+    raw = app.cfg.recordings_dir / "call-synthetic.wav"
+    raw.write_bytes(b"synthetic")
+    app.cfg.cloud = True
+
+    async def scenario():
+        requests = []
+
+        async def serve(reader, writer):
+            while line := await reader.readline():
+                request = json.loads(line)
+                requests.append(request)
+                if request["cmd"] == "subscribe":
+                    reply = {"state": "ready", "cloud": True, "jobs": []}
+                else:
+                    assert request["cmd"] == "process"
+                    reply = {"job": {"id": 1, "audio": str(raw), "state": "queued", "stage": ""}}
+                writer.write((json.dumps({"id": request["id"], "ok": True, **reply}) + "\n").encode())
+                await writer.drain()
+            writer.close()
+
+        server = await asyncio.start_unix_server(serve, str(socket_path))
+        try:
+            async with app.run_test(size=(160, 50)) as pilot:
+                async with asyncio.timeout(5):
+                    while app.client is None:
+                        await pilot.pause()
+                    table = app.query_one("#calls", DataTable)
+                    table.move_cursor(row=next(i for i, row in enumerate(_rows(app, "calls")) if row[0] == "synthetic"))
+                    await app.action_process()
+                process = next(request for request in requests if request["cmd"] == "process")
+                assert process["cloud"] is True and process["path"] == str(raw)
+                assert all(request["cloud"] is True for request in requests)
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    asyncio.run(scenario())
+
+
 def test_deleting_a_call_asks_first(app, tmp_path):
     folder = tmp_path / "output" / "call-2026-10-20_14-15-56"
 
@@ -156,10 +267,11 @@ def test_process_selected_raw_creates_a_result(app, tmp_path, monkeypatch, socke
     monkeypatch.setattr(daemon, "EDITS_PATH", tmp_path / "edits.jsonl")
 
     def process(audio, models, out_root, **kwargs):
+        assert kwargs["llm"] is None
         folder = out_root / audio.stem
         folder.mkdir()
         (folder / "meta.json").write_text(json.dumps({"audio": str(audio)}))
-        (folder / "summary.md").write_text("Synthetic summary")
+        (folder / "transcript.txt").write_text("[00:00 – 00:01] Я: Synthetic transcript")
         return type("Result", (), {"out_dir": folder})()
 
     monkeypatch.setattr(daemon, "process", process)
@@ -180,10 +292,10 @@ def test_process_selected_raw_creates_a_result(app, tmp_path, monkeypatch, socke
                     table = app.query_one("#calls", DataTable)
                     table.move_cursor(row=next(i for i, row in enumerate(_rows(app, "calls")) if row[0] == "raw"))
                     await pilot.press("p")
-                    while "Synthetic summary" not in app.query_one("#view", Markdown).source:
+                    while "Synthetic transcript" not in app.query_one("#view", Markdown).source:
                         await pilot.pause()
                 assert raw.read_bytes() == b"RIFF"
-                assert (tmp_path / "output" / raw.stem / "summary.md").read_text() == "Synthetic summary"
+                assert "Synthetic transcript" in (tmp_path / "output" / raw.stem / "transcript.txt").read_text()
                 assert table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value.endswith(raw.stem)
         finally:
             worker.cancel()
@@ -240,7 +352,10 @@ def test_reconnect_loads_jobs_and_completion_keeps_selection(app, tmp_path, monk
             await asyncio.Event().wait()
             yield
 
-    async def connect():
+        async def close(self):
+            pass
+
+    async def connect(*, cloud=False):
         return Client()
 
     monkeypatch.setattr(tui.DaemonClient, "connect", connect)
@@ -263,5 +378,20 @@ def test_reconnect_loads_jobs_and_completion_keeps_selection(app, tmp_path, monk
         app.handle({"event": "job", **job, "state": "failed", "error": "failed"})
         assert "failed" in app.query_one("#view", Markdown).source
         assert str(raw) not in app.query_one("#view", Markdown).source
+
+    _run(app, scenario)
+
+
+def test_retention_event_removes_expired_rows_without_losing_current_history(app, tmp_path):
+    from datetime import UTC, datetime
+
+    path = tmp_path / "dictations.jsonl"
+    append_dictation({"time": "2026-11-03T12:00:00Z", "text": "Current", "raw": "current"}, path)
+
+    async def scenario(pilot):
+        assert [row[1] for row in _rows(app, "dictations")] == ["Current", "Привет"]
+        removed = history.prune_dictations(path, now=datetime(2026, 11, 3, 12, tzinfo=UTC))
+        app.handle({"event": "history_pruned", "deleted": removed})
+        assert _rows(app, "dictations") == [["11-03 12:00", "Current"]]
 
     _run(app, scenario)

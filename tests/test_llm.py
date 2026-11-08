@@ -188,6 +188,14 @@ def mlx(monkeypatch):
         llm_module._unload(name)
 
 
+def test_default_cleanup_uses_prepared_snapshot_only(mlx, monkeypatch, tmp_path):
+    from wav2sum import local_models
+
+    monkeypatch.setattr(local_models, "snapshot_path", lambda *args: tmp_path)
+    LLM(local_models.CLEANUP_MODEL).chat("system", "input")
+    assert mlx.loads == [str(tmp_path)]
+
+
 def test_chat_sends_system_examples_and_options_and_drops_the_thinking(mlx):
     llm = LLM("gemma", num_ctx=4096, temperature=0.2, think=False)
 

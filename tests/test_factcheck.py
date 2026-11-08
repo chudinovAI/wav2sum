@@ -1,6 +1,8 @@
 import json
 
-from wav2sum.factcheck import report, unsupported
+import pytest
+
+from wav2sum.factcheck import main, report, unsupported
 from wav2sum.llm import LLM
 
 TRANSCRIPT = """\
@@ -24,6 +26,13 @@ def test_timestamps_are_not_numbers_of_the_call():
     assert unsupported("Решили к 03:09.", TRANSCRIPT) == [("Решили к 03:09.", ["03", "09"])]
 
 
+def test_citation_ids_and_timecodes_are_not_invented_numbers_or_names():
+    assert unsupported("* Mistral used 3800 GPUs. [U2 04:13–04:50]", TRANSCRIPT) == []
+    assert unsupported("* Mistral used 4000 GPUs. [U2 04:13–04:50]", TRANSCRIPT) == [
+        ("* Mistral used 4000 GPUs. [U2 04:13–04:50]", ["4000"])
+    ]
+
+
 def test_name_missing_from_the_transcript_is_reported():
     summary = "* He said Andre compared Astra with Mistral, and Yee works at DeepMind.\n* Решили, что Илья напишет."
     assert unsupported(summary, TRANSCRIPT) == [
@@ -41,9 +50,9 @@ class FakeLLM(LLM):
         super().__init__("fake")
         self.calls: list[tuple[str, str]] = []
 
-    def chat(self, system: str, user: str, examples=()) -> str:
+    def chat(self, system: str, user: str, examples=(), *, max_growth=None) -> str:
         self.calls.append((system, user))
-        return "**Topic** — GPUs.\n* He said Yee asked for 100,000 GPUs."
+        return "**Topic** — GPUs. [U1 03:09–03:23]\n* He said Yee asked for 100,000 GPUs. [U1 03:09–03:23]"
 
     def count_tokens(self, text: str) -> int:
         return len(text.split())
@@ -61,7 +70,15 @@ def test_report_summarizes_each_call_again_in_its_language(tmp_path):
 
     system, user = llm.calls[0]
     assert system.startswith("You write a summary") and "Astra." in system
-    assert "[03:09" not in user and "Собеседник: They're using" in user
+    assert "[U1 03:09–03:23]" in user and "Собеседник: They're using" in user
     assert "## call-2026-10-20_14-15-56" in text
-    assert "* He said Yee asked for 100,000 GPUs.\n  not in the transcript: Yee, 100,000" in text
+    assert "* He said Yee asked for 100,000 GPUs. [U1 03:09–03:23]\n  not in the transcript: Yee, 100,000" in text
     assert (call / "summary.md").read_text(encoding="utf-8") == "old"
+
+
+def test_factcheck_without_cloud_refuses_before_reading_a_call(tmp_path, capsys):
+    missing_call = tmp_path / "private-call-not-to-be-read"
+    with pytest.raises(SystemExit) as stopped:
+        main([str(missing_call)])
+    assert stopped.value.code == 2
+    assert "--cloud" in capsys.readouterr().err

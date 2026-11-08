@@ -2,13 +2,11 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from audio_fakes import FakeVAD
 
 from wav2sum.config import AUTO, DictationConfig
 from wav2sum.dictation import (
-    CLEANUP_EXAMPLES_RU,
-    MAX_GROWTH,
     STYLES_EN,
-    DictationStream,
     Dictator,
     expand_snippets,
     fit_to_cursor,
@@ -17,7 +15,6 @@ from wav2sum.dictation import (
     user_examples,
 )
 from wav2sum.language import text_language
-from wav2sum.vad import merge_close_spans
 from wav2sum.vocabulary import Vocabulary
 
 
@@ -35,16 +32,18 @@ def test_snippets_survive_as_markers():
     assert expand_snippets(text, expansions) == "Пиши на me@example.com, ладно?"
 
 
-def test_short_text_skips_llm_and_chat_drops_final_period():
-    dictator = Dictator(models=None, cfg=DictationConfig(cleanup=True))
-    assert dictator.clean("Привет.", "chat") == "Привет"
-    assert dictator.clean("Привет.", "email") == "Привет."
+def test_short_text_goes_to_llm_and_chat_drops_final_period():
+    dictator = _dictator("Привет.")
+    assert dictator.clean("привет", "chat") == "Привет"
+    assert dictator.clean("привет", "email") == "Привет."
+    assert [user for _, user in dictator.llm.requests] == ["привет", "привет"]
 
 
 def test_learned_words_fix_text_and_reach_the_prompt_only_as_pairs():
     vocabulary = Vocabulary()
     vocabulary.learn("Залей на гитхаб", "Залей на GitHub")
     dictator = Dictator(models=None, cfg=DictationConfig(dictionary=["GigaAM"]), vocabulary=vocabulary)
+    dictator.llm = ScriptedLLM(lambda text: text)
     assert dictator.clean("На гитхаб.", "chat") == "На GitHub"
     prompt = dictator._prompt("cleanup", "default")
     assert "именно так: GigaAM." in prompt
@@ -54,32 +53,74 @@ def test_learned_words_fix_text_and_reach_the_prompt_only_as_pairs():
 class FakeAsr:
     def __init__(self, text):
         self.text = text
+        self.languages = []
 
-    def transcribe_spans(self, audio, spans):
+    def transcribe_spans(self, audio, spans, language=None, *, terms=()):
+        self.languages.append(language)
         return [self.text for _ in spans]
 
 
 def fake_models(language):
-    # GigaAM writes English speech in Latin letters.
-    asr = {"ru": FakeAsr("привет" if language == "ru" else "Hallo"), "en": FakeAsr("hello")}
-    return SimpleNamespace(vad=SimpleNamespace(speech_spans=lambda audio: [(0.0, 1.0)]), asr_for=asr.__getitem__)
+    asr = FakeAsr("привет" if language == "ru" else "hello")
+    return SimpleNamespace(vad=FakeVAD(lambda audio: [(0.0, 1.0)]), dictation_asr=asr)
 
 
-def test_detected_language_picks_the_recognizer_and_prompts():
-    for language, raw in (("en", "hello"), ("ru", "привет")):
-        dictation = Dictator(fake_models(language), DictationConfig(), language=AUTO).dictate(np.zeros(16_000))
-        assert (dictation.language, dictation.raw) == (language, raw)
+@pytest.mark.parametrize(
+    ("text", "language"),
+    [
+        ("hello there friend", "en"),
+        ("привет всем друзьям", "ru"),
+        ("Проверь Python Script работает", "ru"),
+    ],
+)
+def test_auto_uses_final_text_language_for_cleanup_and_command(text, language):
+    dictator = _dictator(text)
+    dictator.models = fake_models("ru")
+    dictator.models.dictation_asr.text = text
+    dictator.language = AUTO
+    result = dictator.dictate(np.zeros(16_000))
+    assert (result.raw, result.language) == (text, language)
+    assert dictator.models.dictation_asr.languages == [None]
+    system, _ = dictator.llm.requests[-1]
+    assert system.startswith("You edit voice input" if language == "en" else "Ты")
+    dictator.dictate(np.zeros(16_000), command=True)
+    system, _ = dictator.llm.requests[-1]
+    assert system.startswith("You help with text" if language == "en" else "Ты")
 
 
-def test_fixed_language_skips_detection():
+def test_fixed_language_is_forwarded_and_retained():
     models = fake_models("ru")
-    assert Dictator(models, DictationConfig(), language="en").recognize(np.zeros(16_000)) == ("hello", "en")
+    assert Dictator(models, DictationConfig(), language="en").recognize(np.zeros(16_000)) == ("привет", "en")
+    assert models.dictation_asr.languages == ["en"]
 
 
-def test_english_prompt_is_english():
-    dictator = Dictator(models=None, cfg=DictationConfig(dictionary=["GigaAM"]))
-    prompt = dictator._prompt("cleanup", "chat", language="en")
-    assert "You edit voice input" in prompt and "chat message" in prompt and "GigaAM" in prompt
+def test_warm_up_loads_dictation_models_and_cleanup_llm():
+    calls = []
+    dictator = Dictator(SimpleNamespace(preload_dictation=lambda: calls.append("models")), DictationConfig())
+    dictator.warm_llm = lambda: calls.append("llm")
+    dictator.warm_up()
+    assert calls == ["models", "llm"]
+
+
+def test_cloud_warmup_validates_credentials_without_paid_request(monkeypatch):
+    from wav2sum import dictation
+
+    calls = []
+
+    class CloudLLM:
+        def __init__(self, **kwargs):
+            pass
+
+        def validate_credentials(self):
+            calls.append("llm credentials")
+
+        def chat(self, *args, **kwargs):
+            pytest.fail("warmup must not call cloud LLM")
+
+    monkeypatch.setattr(dictation, "OpenAILLM", CloudLLM)
+    models = SimpleNamespace(cloud=True, preload_dictation=lambda: calls.append("asr credentials"))
+    Dictator(models, DictationConfig()).warm_up()
+    assert calls == ["asr credentials", "llm credentials"]
 
 
 class ScriptedLLM:
@@ -113,34 +154,62 @@ def test_cleanup_keeps_snippets_and_learned_words():
     assert "⟦1⟧" in system
 
 
-def test_broken_or_runaway_cleanup_falls_back_to_raw_text():
+def test_cleanup_sends_recorded_self_correction_unchanged_and_accepts_llm_result():
+    raw = (
+        "Завтра сезон в 15:30. Нет, перенеси на 16 30. После их встречи создай полуреквест на GitHub "
+        "и отправи ссылку в Slack. Please review the changes before merging into Main. "
+        "Bюджет двенадцать долларов пятьдесят центов. Документы пока не отправляй. "
+        "Сначала дождись нового подтверждения."
+    )
+    corrected = (
+        "Завтра сезон в 16:30. После их встречи создай pull request на GitHub и отправь ссылку в Slack. "
+        "Please review the changes before merging into main. Бюджет — 12 долларов 50 центов. "
+        "Документы пока не отправляй. Сначала дождись нового подтверждения."
+    )
+    dictator = _dictator(corrected)
+    assert dictator.clean(raw, "default") == corrected
+    assert dictator.llm.requests[0][1] == raw
+
+
+@pytest.mark.parametrize(
+    ("raw", "corrected"),
+    [
+        ("Не отправляй документы, нет, отправляй.", "Отправляй документы."),
+        ("Проверь почту. Ну. Ответь коллегам.", "Проверь почту и ответь коллегам."),
+        ("коротко", "Длинный ответ. " * 20),
+    ],
+)
+def test_cleanup_accepts_successful_llm_rewrites(raw, corrected):
+    assert _dictator(corrected).clean(raw, "default") == corrected
+
+
+@pytest.mark.parametrize("reply", [TimeoutError("ollama is slow"), ""])
+def test_failed_or_empty_cleanup_falls_back_to_unmodified_raw_text(reply):
+    raw = "Завтра в 15:30. Нет, перенеси на 16 30. Документы пока не отправляй"
+    dictator = _dictator(reply)
+    assert dictator.clean(raw, "default") == raw
+    assert dictator.llm.requests[0][1] == raw
+
+
+def test_cloud_cleanup_failure_keeps_raw_but_translation_failure_raises(monkeypatch):
+    from wav2sum import dictation
+
+    class CloudLLM(ScriptedLLM):
+        def __init__(self, **kwargs):
+            super().__init__(RuntimeError("cloud unavailable"))
+
+    monkeypatch.setattr(dictation, "OpenAILLM", CloudLLM)
+    dictator = Dictator(SimpleNamespace(cloud=True), DictationConfig())
     raw = "ну давай созвонимся в пятницу"
-    assert _dictator(TimeoutError("ollama is slow")).clean(raw, "default") == raw
-    assert _dictator("").clean(raw, "default") == raw
-    assert _dictator("Конечно! Вот письмо: " + "бла " * 50).clean(raw, "default") == raw
-
-
-def test_cleanup_and_translation_limit_the_reply_but_a_command_does_not():
-    dictator = _dictator("Текст")
-    dictator.clean("ну давай созвонимся в пятницу", "default")
-    dictator.translate("ну давай созвонимся в пятницу", "default")
-    dictator.models = fake_models("ru")
-    dictator.dictate(np.zeros(16_000), selection="Текст", command=True)
-    assert dictator.llm.growths == [MAX_GROWTH, MAX_GROWTH, None]
-
-
-def test_only_cleanup_drafts_its_reply_from_the_input():
-    dictator = _dictator("Текст")
-    dictator.clean("ну давай созвонимся в пятницу", "default")
-    dictator.translate("ну давай созвонимся в пятницу", "default")
-    dictator.models = fake_models("ru")
-    dictator.dictate(np.zeros(16_000), selection="Текст", command=True)
-    assert dictator.llm.lookups == [True, False, False]
+    assert dictator.clean(raw, "default") == raw
+    with pytest.raises(RuntimeError, match="cloud unavailable"):
+        dictator.translate(raw, "default")
 
 
 def test_cleanup_off_inserts_raw_text():
     dictator = _dictator(AssertionError("LLM must not run"), cleanup=False)
     assert dictator.clean("ну давай созвонимся в пятницу", "email") == "ну давай созвонимся в пятницу"
+    assert dictator.llm.requests == []
 
 
 def test_voice_command_rewrites_the_selection():
@@ -150,7 +219,7 @@ def test_voice_command_rewrites_the_selection():
     assert (dictation.text, dictation.command, dictation.language) == ("Short text", True, "ru")
     [(system, user)] = dictator.llm.requests
     assert system.startswith("Ты — помощник по работе с текстом")
-    assert user == "Текст:\nA very long text\n\nКоманда: Hallo"
+    assert user == "Текст:\nA very long text\n\nКоманда: hello"
 
 
 def test_silence_gives_empty_text_without_llm():
@@ -182,7 +251,7 @@ def test_cursor_keeps_abbreviations_names_and_english_i():
 def test_dictation_fits_the_cursor_but_a_command_does_not():
     dictator = _dictator("Давай созвонимся.")
     dictator.models = fake_models("ru")
-    dictator.models.asr_for = lambda language: FakeAsr("ну давай созвонимся")
+    dictator.models.dictation_asr = FakeAsr("ну давай созвонимся")
     assert dictator.dictate(np.zeros(16_000), before="Я думаю", after=" завтра").text == " давай созвонимся"
     dictator.cfg.dictionary = ["Давай"]
     assert dictator.dictate(np.zeros(16_000), before="Я думаю", after="").text == " Давай созвонимся."
@@ -228,10 +297,21 @@ def test_translation_keeps_snippets_and_learned_words():
 
 
 def test_translation_of_english_speech_is_plain_cleanup():
-    dictator = _dictator(AssertionError("LLM must not run"))
+    dictator = _dictator("Hello.")
     dictator.models = fake_models("en")
     dictator.language = "en"
-    assert dictator.dictate(np.zeros(16_000), translate=True).text == "hello"
+    assert dictator.dictate(np.zeros(16_000), translate=True).text == "Hello."
+    assert dictator.llm.requests[0][1] == "hello"
+
+
+@pytest.mark.parametrize(("language", "expected"), [("ru", "Hi"), ("en", "hello")])
+def test_auto_translation_uses_final_text_language(language, expected):
+    dictator = _dictator("Hi", cleanup=False)
+    dictator.models = fake_models(language)
+    dictator.language = AUTO
+    result = dictator.dictate(np.zeros(16_000), translate=True)
+    assert (result.language, result.text) == (language, expected)
+    assert len(dictator.llm.requests) == (1 if language == "ru" else 0)
 
 
 def test_broken_or_runaway_translation_raises():
@@ -242,100 +322,6 @@ def test_broken_or_runaway_translation_raises():
         _dictator("").translate(raw, "default")
     with pytest.raises(ValueError):
         _dictator("Sure! Here is the email: " + "bla " * 50).translate(raw, "default")
-
-
-class SpanAsr:
-    """Names each span by its start, and remembers which spans it was asked for."""
-
-    def __init__(self):
-        self.calls = []
-
-    def transcribe_spans(self, audio, spans):
-        self.calls.append(spans)
-        return [f"{start:g}" for start, _ in spans]
-
-
-def loud_models():
-    """VAD that hears every non-zero sample, so a span ends only when silence follows it, like Silero."""
-
-    def speech_spans(audio):
-        loud = np.flatnonzero(np.diff(np.concatenate([[0], audio != 0, [0]]).astype(int)))
-        spans = [(start / 16_000, end / 16_000) for start, end in zip(loud[::2], loud[1::2], strict=True)]
-        return merge_close_spans(spans, 0.6, 20.0)
-
-    asr = SpanAsr()
-    return SimpleNamespace(vad=SimpleNamespace(speech_spans=speech_spans), asr_for=lambda _: asr, asr=asr)
-
-
-def _speech(*parts):
-    """Seconds of speech and silence in turns, starting with speech."""
-    return np.concatenate(
-        [np.full(int(s * 16_000), 0.5 if i % 2 == 0 else 0.0, np.float32) for i, s in enumerate(parts)]
-    )
-
-
-@pytest.fixture
-def models():
-    return loud_models()
-
-
-def test_stream_recognizes_a_phrase_once_the_next_one_starts(models):
-    audio = _speech(1, 1, 1, 0.3, 1)
-    stream = DictationStream(Dictator(models, DictationConfig(), language="ru"))
-    stream.add(audio[:24_000])
-    stream.step()
-    assert models.asr.calls == []
-    stream.add(audio[24_000:40_000])
-    stream.step()
-    assert models.asr.calls == [[(0.0, 1.0)]]
-    stream.add(audio[40_000:])
-    assert stream.finish() == ("0 2", "ru")
-    assert models.asr.calls == [[(0.0, 1.0)], [(2.0, 4.3)]]
-    assert stream.live > 0
-
-
-def test_streamed_text_matches_the_whole_recording(models):
-    audio = _speech(1.2, 0.8, 2, 1, 0.5, 0.7, 3, 0.2)
-    dictator = Dictator(models, DictationConfig(), language="ru")
-    stream = DictationStream(dictator)
-    for start in range(0, len(audio), 16_000):
-        stream.add(audio[start : start + 16_000])
-        stream.step()
-    assert stream.finish() == dictator.recognize(audio)
-
-
-def test_auto_language_waits_for_three_seconds_of_finished_speech(models):
-    audio = _speech(2, 1, 2, 1, 1)
-    stream = DictationStream(Dictator(models, DictationConfig(), language=AUTO))
-    stream.add(audio[: 4 * 16_000])
-    stream.step()
-    assert models.asr.calls == []
-    stream.add(audio[4 * 16_000 :])
-    stream.step()
-    assert models.asr.calls == [[(0.0, 2.0), (3.0, 5.0)]]
-    assert stream.finish() == ("0 3 6", "ru")
-    assert models.asr.calls == [[(0.0, 2.0), (3.0, 5.0)], [(6.0, 7.0)]]
-
-
-def test_short_auto_dictation_detects_the_language_at_the_end(models):
-    stream = DictationStream(Dictator(models, DictationConfig(), language=AUTO))
-    stream.add(_speech(1, 1, 1))
-    stream.step()
-    assert stream.finish() == ("0 2", "ru")
-    assert models.asr.calls == [[(0.0, 1.0), (2.0, 3.0)]]
-
-
-def test_latin_text_from_gigaam_sends_the_dictation_to_parakeet(models):
-    gigaam, parakeet = SpanAsr(), SpanAsr()
-    gigaam.transcribe_spans = lambda audio, spans: gigaam.calls.append(spans) or ["Sence for the fitback"] * len(spans)
-    models.asr_for = {"ru": gigaam, "en": parakeet}.__getitem__
-    audio = _speech(2, 1, 2, 1, 1)
-    stream = DictationStream(Dictator(models, DictationConfig(), language=AUTO))
-    stream.add(audio)
-    stream.step()
-    assert stream.finish() == ("0 3 6", "en")
-    assert gigaam.calls == [[(0.0, 2.0), (3.0, 5.0)]]
-    assert parakeet.calls == [[(0.0, 2.0), (3.0, 5.0)], [(6.0, 7.0)]]
 
 
 @pytest.mark.parametrize(
@@ -353,17 +339,6 @@ def test_text_language_by_the_share_of_latin_letters(text, language):
     assert text_language(text) == language
 
 
-def test_streamed_dictation_reports_live_and_final_asr(models):
-    dictator = _dictator("Текст", cleanup=False)
-    dictator.models = models
-    stream = DictationStream(dictator)
-    stream.add(_speech(1, 1, 1))
-    stream.step()
-    dictation = dictator.dictate(stream.audio, stream=stream)
-    assert dictation.raw == "0 2"
-    assert set(dictation.timings) == {"asr", "asr_live", "llm"}
-
-
 def test_user_examples_take_the_3_latest_edits_of_each_style_and_language():
     def edit(raw, style="chat", language="ru"):
         return {"raw": raw, "edited": raw.upper(), "style": style, "language": language}
@@ -375,13 +350,3 @@ def test_user_examples_take_the_3_latest_edits_of_each_style_and_language():
         ("chat", "en"): [("hi", "HI")],
         ("email", "ru"): [("три", "ТРИ")],
     }
-
-
-def test_cleanup_uses_the_users_examples_of_its_style_and_language():
-    calls = []
-    dictator = Dictator(models=None, cfg=DictationConfig(), examples={("chat", "ru"): [("ну да", "Да —")]})
-    dictator.llm = SimpleNamespace(chat=lambda system, text, examples, **kw: calls.append(examples) or text)
-    dictator.clean("ну да конечно", "chat")
-    dictator.clean("ну да конечно", "email")
-    dictator.warm_llm()
-    assert calls == [[("ну да", "Да —")], CLEANUP_EXAMPLES_RU, CLEANUP_EXAMPLES_RU]

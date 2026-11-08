@@ -1,12 +1,15 @@
 import gc
 import threading
+from contextlib import contextmanager
 
 import numpy as np
 import torch
 
-from wav2sum.asr import EnglishTranscriber, Transcriber
+from wav2sum.asr import QwenTranscriber
+from wav2sum.cloud import DeepgramTranscriber
 from wav2sum.diarizer import Diarizer
-from wav2sum.language import EN, RU, LanguageDetector
+from wav2sum.local_models import check_memory
+from wav2sum.nemotron import NemotronTranscriber
 from wav2sum.vad import VoiceActivityDetector
 
 
@@ -21,26 +24,45 @@ def detect_device(requested: str | None = None) -> str:
 
 
 class Models:
-    def __init__(self, device: str | None = None):
+    def __init__(
+        self,
+        device: str | None = None,
+        *,
+        cloud: bool = False,
+        call_model: str = "nemotron",
+        allow_unsafe_nemotron: bool = False,
+    ):
+        if call_model not in ("qwen", "nemotron"):
+            raise ValueError("Unknown local call model")
         self.device = detect_device(device)
+        self.cloud = cloud
+        self.call_model = call_model
+        self.allow_unsafe_nemotron = allow_unsafe_nemotron
         self._loaded: dict[str, object] = {}
-        # Each model keeps its own lock, so dictation waits only for a model the call is using right now.
+        # Dictation and call models do not block each other.
         self._locks: dict[str, threading.Lock] = {}
+        self._call_session_lock = threading.Lock()
 
     @property
-    def asr(self) -> Transcriber:
-        return self._load("asr", lambda: Transcriber(self.device))
+    def dictation_asr(self) -> QwenTranscriber | DeepgramTranscriber:
+        return self._load("dictation_asr", DeepgramTranscriber if self.cloud else lambda: QwenTranscriber(self.device))
 
     @property
-    def english_asr(self) -> EnglishTranscriber:
-        return self._load("english_asr", EnglishTranscriber)
+    def call_asr(self) -> NemotronTranscriber | QwenTranscriber:
+        if self.cloud:
+            raise RuntimeError("local call ASR is unavailable in cloud mode")
+        if self.call_model == "qwen":
+            return self._load("call_asr", lambda: QwenTranscriber(self.device))
+        check_memory("nemotron", allow_unsafe=self.allow_unsafe_nemotron)
+        return self._load("call_asr", lambda: NemotronTranscriber(self.device))
 
-    def asr_for(self, language: str) -> Transcriber | EnglishTranscriber:
-        return self.english_asr if language == EN else self.asr
-
-    @property
-    def lid(self) -> LanguageDetector:
-        return self._load("lid", LanguageDetector)
+    @contextmanager
+    def call_session(self):
+        with self._call_session_lock:
+            try:
+                yield
+            finally:
+                self.unload("call_asr")
 
     @property
     def vad(self) -> VoiceActivityDetector:
@@ -50,17 +72,19 @@ class Models:
     def diarizer(self) -> Diarizer:
         return self._load("diarizer", lambda: Diarizer(self.device))
 
-    def preload(self, languages: list[str] = (RU,)) -> None:
+    def preload_dictation(self) -> None:
+        if self.cloud:
+            self.dictation_asr.validate_credentials()
+            return
         silence = np.zeros(16_000, dtype=np.float32)
-        for language in languages:
-            self.asr_for(language).transcribe(silence)
-        if len(languages) > 1:
-            self.lid.detect(silence)
+        self.dictation_asr.transcribe(silence)
         self.vad.speech_spans(silence)
 
     def unload(self, name: str) -> None:
         with self._locks.setdefault(name, threading.Lock()):
-            self._loaded.pop(name, None)
+            model = self._loaded.pop(name, None)
+            if name == "call_asr" and model is not None and hasattr(model, "close"):
+                model.close()
             gc.collect()
             if self.device == "mps":
                 torch.mps.empty_cache()

@@ -73,3 +73,51 @@ def test_main_prints_all_history_and_mlx_only_and_leaves_the_file(tmp_path, caps
     assert _row(all_history, "all").startswith("| all | 2 |")
     assert _row(mlx, "all").startswith("| all | 1 |")
     assert path.read_bytes() == before
+
+
+def test_pipeline_latency_includes_inflight_work_and_keeps_missing_samples_out():
+    entries = [
+        _entry(
+            f"10:{i:02}:00",
+            seconds=2,
+            timings={
+                "asr": 0.1,
+                "llm": 0.2,
+                "finalize": i,
+                "preview": i / 2,
+                "audio_sent": 2,
+            },
+        )
+        for i in range(1, 21)
+    ]
+    entries.append(_entry("11:00:00"))
+    text = report(entries)
+    assert _row(text, "cloud final request → ready") == "| cloud final request → ready | 20 | 10.50 | 19.05 |"
+    assert _row(text, "cloud first preview").startswith("| cloud first preview | 20 | 5.25 |")
+    assert _row(text, "cloud sent / captured") == "| cloud sent / captured | 20 | 1.00 | 1.00 |"
+
+
+def test_pipeline_metrics_keep_local_cloud_and_zero_length_audio_separate():
+    entries = [
+        _entry("10:00:00", timings={"asr": 1, "llm": 2, "finalize": 8, "asr_live": 30}),
+        _entry("10:01:00", seconds=0, timings={"asr": 1, "llm": 2, "finalize": 4, "audio_sent": 0}),
+    ]
+    text = report(entries)
+    assert _row(text, "local final request → ready") == "| local final request → ready | 1 | 8.00 | 8.00 |"
+    assert _row(text, "cloud final request → ready") == "| cloud final request → ready | 1 | 4.00 | 4.00 |"
+    assert "| cloud sent / captured |" not in text
+    assert "first preview |" not in text
+
+
+def test_audio_ratio_uses_received_samples_not_rounded_history_duration():
+    entry = _entry(
+        "10:00:00",
+        seconds=0.8,
+        timings={
+            "asr": 0,
+            "llm": 0,
+            "audio_sent": 0.75,
+            "audio_received": 0.75,
+        },
+    )
+    assert _row(report([entry]), "cloud sent / captured") == "| cloud sent / captured | 1 | 1.00 | 1.00 |"

@@ -1,6 +1,10 @@
+import re
+
+import pytest
+
 from wav2sum.language import EN, RU
 from wav2sum.llm import LLM
-from wav2sum.summarizer import PROMPTS, chapters, chunk_transcript, summarize
+from wav2sum.summarizer import chapters, chunk_transcript, summarize
 
 
 class FakeLLM(LLM):
@@ -8,9 +12,10 @@ class FakeLLM(LLM):
         super().__init__("fake", num_ctx=num_ctx)
         self.prompts: list[str] = []
 
-    def chat(self, system: str, user: str, examples=()) -> str:
+    def chat(self, system: str, user: str, examples=(), *, max_growth=None) -> str:
         self.prompts.append(system)
-        return "заметки"
+        refs = re.findall(r"\[U\d+ \d+:\d\d(?::\d\d)?–\d+:\d\d(?::\d\d)?\]", user)
+        return f"**Topic** — Discussed. {refs[0]}" if refs else ""
 
     def count_tokens(self, text: str) -> int:
         return len(text.split())
@@ -25,62 +30,192 @@ def test_chunks_keep_utterances_whole_and_in_order():
     assert "\n\n".join(chunks) == transcript
 
 
-def test_terms_reach_every_prompt_of_a_long_call():
-    llm = FakeLLM(num_ctx=4096 + 100)
-    summarize("\n\n".join(["Я: " + "слово " * 30] * 10), llm, ["Kubernetes", "GigaAM"])
-    assert len(llm.prompts) > 2
-    assert all("Kubernetes, GigaAM" in p for p in llm.prompts)
+@pytest.mark.parametrize("language", [RU, EN])
+def test_summary_has_verified_readable_references_for_repeated_speaker_times(language):
+    transcript = "[00:01 – 00:04] Я: Привет\n\n[00:01 – 00:04] Я: Ещё привет"
+
+    class Reply(FakeLLM):
+        def chat(self, system, user, examples=(), *, max_growth=None):
+            assert "[U1 00:01–00:04]" in user
+            assert "[U2 00:01–00:04]" in user
+            return "**Topic** — Привет. [U2 00:01–00:04]\n**Discussion**\n- Встреча. [U1 00:01–00:04]"
+
+    assert "[U2 00:01–00:04]" in summarize(transcript, Reply(), language=language)
 
 
-def test_no_glossary_without_terms():
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "**Topic** — No citation.",
+        "**Topic** — Fabricated. [U9 00:01–00:04]",
+        "**Topic** — Wrong timestamp. [U1 00:01–00:05]",
+        "**Topic** — Malformed. [U1]",
+        "**Topic** — Mixed. [U1 00:01–00:04] [U8]",
+        "**Topic** — Valid. [U1 00:01–00:04]\n- Unsupported point",
+        "**Topic** — Valid. [U1 00:01–00:04]\n**Решили перечислить 100 рублей**",
+        "**Topic** — Unsupported. <!-- [U1 00:01–00:04] -->",
+        "**Topic** — Unsupported. [details](https://example.test/[U1 00:01–00:04])",
+        "**Topic** — Valid. [U1 00:01–00:04]\n<!--\n- Hidden [U1 00:01–00:04]\n-->\n- Unsupported.",
+        "**Topic** — Valid. [U1 00:01–00:04]\n- Unsupported. [details](https://example.test/[U1 00:01–00:04])",
+        "**Topic** — Valid. [U1 00:01–00:04]\n- Invalid hidden reference. <!-- [U9 00:01–00:04] -->",
+        "**Topic** — Valid. [U1 00:01–00:04]\n- Invalid hidden marker. <!-- [U9] -->",
+        "",
+    ],
+)
+def test_summary_rejects_uncited_or_invalid_references(reply):
+    class Reply(FakeLLM):
+        def chat(self, system, user, examples=(), *, max_growth=None):
+            return reply
+
+    with pytest.raises(ValueError):
+        summarize("[00:01 – 00:04] Я: Привет", Reply())
+
+
+def test_empty_transcript_does_not_call_model_and_empty_heading_needs_no_reference():
     llm = FakeLLM()
-    summarize("Я: привет", llm)
-    assert "Термины" not in llm.prompts[0]
+    assert summarize("", llm) == ""
+    assert not llm.prompts
+
+    class Reply(FakeLLM):
+        def chat(self, system, user, examples=(), *, max_growth=None):
+            return "**Topic** — Привет. [U1 00:01–00:04]\n**Discussion**"
+
+    assert summarize("[00:01 – 00:04] Я: Привет", Reply()).endswith("**Discussion**")
 
 
-def test_english_call_gets_english_prompts():
-    llm = FakeLLM()
-    summarize("Me: hi", llm, ["GigaAM"], language="en")
-    assert llm.prompts[0].startswith("You write a summary")
-    assert "spell them exactly like this: GigaAM." in llm.prompts[0]
+def test_custom_meeting_heading_is_grounded():
+    class Reply(FakeLLM):
+        def chat(self, system, user, examples=(), *, max_growth=None):
+            return "**Topic** — Урок. [U1 00:01–00:04]\n**Советы преподавателя** [U1 00:01–00:04]"
+
+    assert "**Советы преподавателя** [U1 00:01–00:04]" in summarize(
+        "[00:01 – 00:04] Я: Советую практиковаться", Reply()
+    )
 
 
-def test_long_call_is_summarized_from_notes_on_its_parts():
-    class Recording(FakeLLM):
-        def chat(self, system, user, examples=()):
-            self.prompts.append(system)
-            self.users = [*getattr(self, "users", []), user]
-            return f"заметка {len(self.prompts)}"
+def test_untimestamped_or_malformed_transcript_is_rejected():
+    for transcript in ("Я: привет", "[00:99 – 01:00] Я: привет", "[00:02 – 00:01] Я: привет"):
+        with pytest.raises(ValueError):
+            summarize(transcript, FakeLLM())
 
-    llm = Recording(num_ctx=4096 + 100)
-    assert summarize("\n\n".join(["Я: " + "слово " * 30] * 10), llm) == f"заметка {len(llm.prompts)}"
-    *parts, final = llm.users
-    assert all(p.startswith("Я: ") for p in parts)
-    assert final.startswith("Заметки по частям созвона:\n\n--- Часть 1 ---\nзаметка 1")
-    assert all("Это только ЧАСТЬ встречи" in p for p in llm.prompts[:-1])
-    assert "Это только ЧАСТЬ встречи" not in llm.prompts[-1]
+
+def test_out_of_chunk_reference_is_rejected():
+    transcript = "\n\n".join(f"[{i:02d}:00 – {i:02d}:01] Я: " + "слово " * 30 for i in range(20))
+
+    class WrongChunk(FakeLLM):
+        def chat(self, system, user, examples=(), *, max_growth=None):
+            return "- Point. [U20 19:00–19:01]"
+
+    with pytest.raises(ValueError):
+        summarize(transcript, WrongChunk(num_ctx=4096 + 400))
+
+
+def test_reduction_cannot_cite_a_reference_from_another_batch():
+    transcript = "\n\n".join(f"[{i:02d}:00 – {i:02d}:01] Я: " + "слово " * 70 for i in range(50))
+
+    class WrongReduction(FakeLLM):
+        def chat(self, system, user, examples=(), *, max_growth=None):
+            refs = re.findall(r"\[U\d+ \d+:\d\d–\d+:\d\d\]", user)
+            ref = "[U1 00:00–00:01]" if "Заметки по частям" in user else refs[0]
+            return "- " + "обсудили " * 25 + ref
+
+    with pytest.raises(ValueError, match="out-of-chunk"):
+        summarize(transcript, WrongReduction(num_ctx=4096 + 430))
+
+
+def test_reduction_that_does_not_shrink_fails():
+    transcript = "\n\n".join(f"[{i:02d}:00 – {i:02d}:01] Я: " + "слово " * 70 for i in range(20))
+
+    class Verbose(FakeLLM):
+        def chat(self, system, user, examples=(), *, max_growth=None):
+            ref = re.search(r"\[U\d+ \d+:\d\d–\d+:\d\d\]", user).group()
+            return "- " + "обсудили " * 160 + ref
+
+    with pytest.raises(ValueError, match="could not be reduced"):
+        summarize(transcript, Verbose(num_ctx=4096 + 430))
+
+
+def test_recursive_notes_stay_within_context_and_preserve_original_citations():
+    transcript = "\n\n".join(f"[{i:02d}:00 – {i:02d}:01] Я: " + "слово " * 70 for i in range(50))
+
+    class Reducing(FakeLLM):
+        def __init__(self):
+            super().__init__(num_ctx=4096 + 430)
+            self.users = []
+
+        def chat(self, system, user, examples=(), *, max_growth=None):
+            assert self.count_tokens(system) + self.count_tokens(user) <= self.num_ctx - 4096
+            assert int(max_growth * self.count_tokens(user)) + 64 <= 4096
+            self.users.append(user)
+            refs = list(dict.fromkeys(re.findall(r"\[U\d+ \d+:\d\d–\d+:\d\d\]", user)))
+            return "- " + "обсудили " * 25 + " ".join(dict.fromkeys((refs[0], refs[-1])))
+
+    llm = Reducing()
+    result = summarize(transcript, llm)
+    assert "[U1 00:00–00:01]" in result
+    assert "[U50 49:00–49:01]" in result
+    assert len(llm.users) > 2
+    assert any(user.count("- обсудили") > 1 for user in llm.users)
+
+
+def test_long_single_utterance_is_fragmented_and_summarized_with_its_original_reference():
+    words = [f"фрагмент{i}" for i in range(7000)]
+    transcript = "[00:00 – 12:34] Я: " + " ".join(words)
+
+    class Reducing(FakeLLM):
+        def __init__(self):
+            super().__init__(num_ctx=4096 + 430)
+            self.users = []
+
+        def chat(self, system, user, examples=(), *, max_growth=None):
+            assert self.count_tokens(system) + self.count_tokens(user) <= self.num_ctx - 4096
+            assert int(max_growth * self.count_tokens(user)) + 64 <= 4096
+            self.users.append(user)
+            assert set(re.findall(r"\[U\d+ \d+:\d\d–\d+:\d\d\]", user)) == {"[U1 00:00–12:34]"}
+            return "- " + "обсудили " * 25 + "[U1 00:00–12:34]"
+
+    llm = Reducing()
+    result = summarize(transcript, llm)
+    assert "[U1 00:00–12:34]" in result
+    map_users = [user for user in llm.users if user.startswith("Транскрипт созвона:")]
+    assert len(map_users) > 1
+    assert [word for user in map_users for word in re.findall(r"фрагмент\d+", user)] == words
+    assert any(user.count("- обсудили") > 1 for user in llm.users)
+
+
+def test_single_utterance_without_whitespace_is_split_without_losing_text():
+    content = "я" * 20000
+
+    class CharacterCountingLLM(FakeLLM):
+        def __init__(self):
+            super().__init__(num_ctx=4096 + 6000)
+            self.users = []
+
+        def count_tokens(self, text):
+            return len(text)
+
+        def chat(self, system, user, examples=(), *, max_growth=None):
+            assert self.count_tokens(system) + self.count_tokens(user) <= self.num_ctx - 4096
+            self.users.append(user)
+            return "- Факт. [U1 00:00–01:00]"
+
+    llm = CharacterCountingLLM()
+    assert "[U1 00:00–01:00]" in summarize("[00:00 – 01:00] Я: " + content, llm)
+    fragments = [
+        user.split("[U1 00:00–01:00] Я: ", 1)[1] for user in llm.users if user.startswith("Транскрипт созвона:")
+    ]
+    assert len(fragments) > 1
+    assert "".join(fragments) == content
+
+
+def test_impossible_prompt_budget_is_rejected():
+    with pytest.raises(ValueError):
+        summarize("[00:00 – 00:01] Я: слово", FakeLLM(num_ctx=4096 + 1))
 
 
 def test_an_utterance_longer_than_a_chunk_is_kept_whole():
     long = "Я: " + "слово " * 100
     assert chunk_transcript(f"Я: да\n\n{long}\n\nОн: нет", 50, len) == ["Я: да", long, "Он: нет"]
-
-
-def test_a_call_that_fits_in_tokens_goes_in_one_pass_whatever_its_length_in_chars():
-    llm = FakeLLM(num_ctx=4096 + 1000)
-    summarize("Я: " + "антидисэстаблишментарианство " * 300, llm)
-    assert len(llm.prompts) == 1
-
-
-def test_the_system_prompt_with_its_glossary_counts_against_the_budget():
-    transcript = "\n\n".join(["Я: " + "слово " * 30] * 10)
-    llm = FakeLLM(num_ctx=4096 + 1000)
-    summarize(transcript, llm)
-    assert len(llm.prompts) == 1
-
-    llm = FakeLLM(num_ctx=4096 + 1000)
-    summarize(transcript, llm, [f"термин{i}" for i in range(500)])
-    assert len(llm.prompts) > 1
 
 
 def test_chunks_fit_the_token_budget():
@@ -131,6 +266,20 @@ def test_no_chapters_without_a_valid_line_or_when_the_reply_runs_away():
     assert chapters(TRANSCRIPT, Looping("")) == ""
 
 
+@pytest.mark.parametrize("fail_at", [1, 2])
+def test_optional_chapters_provider_failure_is_not_retried(fail_at):
+    class ProviderFailure(ChaptersLLM):
+        def chat(self, system, user, examples=(), max_growth=None, think=None):
+            self.calls.append((system, user, max_growth, think))
+            if len(self.calls) == fail_at:
+                raise RuntimeError("Cloud provider request failed")
+            return "\n".join(["- 00:01 — Intro"] * 9)
+
+    llm = ProviderFailure("")
+    assert chapters(TRANSCRIPT, llm) == ""
+    assert len(llm.calls) == fail_at
+
+
 def test_a_long_call_gets_chapters_from_each_part():
     transcript = "\n\n".join(f"[{i:02d}:00 – {i:02d}:30] Я: " + "слово " * 30 for i in range(10))
     llm = ChaptersLLM("- 00:00 — Начало", num_ctx=4096 + 150)
@@ -153,11 +302,3 @@ def test_more_than_8_chapters_are_merged_in_one_more_call():
     assert chapters(transcript, llm) == "**Главы**\n- 00:00 — Первая половина\n- 06:00 — Вторая половина"
     assert llm.calls[1][1] == "\n".join(f"- {i:02d}:00 — Тема {i}" for i in range(12))
     assert llm.calls[1][3] is False
-
-
-def test_summary_prompts_skip_empty_sections_instead_of_a_placeholder():
-    # A lesson got three "Not discussed" sections out of five, and the teacher's advice was lost (CHU-141).
-    for prompts in PROMPTS.values():
-        assert "Не обсуждалось" not in prompts.summary and "Not discussed" not in prompts.summary
-    assert "советы" in PROMPTS[RU].summary and "советы" in PROMPTS[RU].chunk
-    assert "advice" in PROMPTS[EN].summary and "advice" in PROMPTS[EN].chunk

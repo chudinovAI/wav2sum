@@ -46,11 +46,14 @@ def report(entries: list[dict]) -> str:
         "Model state": _group(entries, states),
     }
     groups["Length"] = {label: groups["Length"][label] for _, label in LENGTHS if label in groups["Length"]}
-    return "\n".join(_table(title, rows) for title, rows in groups.items())
+    tables = [_table(title, rows) for title, rows in groups.items()]
+    if pipeline := _pipeline_table(entries):
+        tables.append(pipeline)
+    return "\n".join(tables)
 
 
 def _mode(e: dict) -> str:
-    # Mirrors Dictator.dictate and clean(): translate is only for Russian, cleanup skips the LLM for 1–2 words.
+    # Input length does not prove cleanup was skipped: even a short number or correction can need the LLM.
     if e["command"]:
         return "command"
     if e.get("translate") and e.get("language") == "ru":
@@ -76,6 +79,31 @@ def _table(title: str, rows: dict[str, list[dict]]) -> str:
             f"{statistics.median(llm):.2f} | {_p90(llm):.2f} | {share:.0%} |"
         )
     return "\n".join(lines) + "\n"
+
+
+def _pipeline_table(entries: list[dict]) -> str:
+    rows = []
+    for provider in ("local", "cloud"):
+        streamed = [
+            e for e in entries if ("audio_sent" in e["timings"] if provider == "cloud" else "asr_live" in e["timings"])
+        ]
+        for field, title in (("finalize", "final request → ready"), ("preview", "first preview")):
+            values = [e["timings"][field] for e in streamed if field in e["timings"]]
+            if values:
+                rows.append(_pipeline_row(f"{provider} {title}", values))
+        if provider == "cloud":
+            audio = [(e["timings"]["audio_sent"], e["timings"].get("audio_received", e["seconds"])) for e in streamed]
+            ratios = [sent / received for sent, received in audio if received > 0]
+            if ratios:
+                rows.append(_pipeline_row("cloud sent / captured", ratios))
+    if not rows:
+        return ""
+    return "\n".join(["### Dictation pipeline", "", "| Metric | n | p50 | p95 |", "|---|---|---|", *rows]) + "\n"
+
+
+def _pipeline_row(label: str, values: list[float]) -> str:
+    p95 = statistics.quantiles(values, n=20, method="inclusive")[-1] if len(values) > 1 else values[0]
+    return f"| {label} | {len(values)} | {statistics.median(values):.2f} | {p95:.2f} |"
 
 
 def _p90(values: list[float]) -> float:

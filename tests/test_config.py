@@ -14,6 +14,28 @@ def test_default_config_round_trips(tmp_path):
     assert load_config(path) == Config()
 
 
+def test_cloud_is_runtime_only(tmp_path, caplog):
+    path = tmp_path / "config.toml"
+    write_default_config(path)
+    assert "cloud" not in tomllib.loads(path.read_text())
+    path.write_text("cloud = true\n")
+    cfg = load_config(path)
+    assert cfg.cloud is False
+    assert "unknown setting cloud" in caplog.text
+    with pytest.raises(TypeError):
+        Config(cloud=True)
+
+
+def test_old_local_summary_model_cannot_become_an_openai_model(tmp_path, caplog):
+    path = tmp_path / "config.toml"
+    path.write_text('model = "mlx-community/old-summary"\n[dictation]\nmodel = "local-cleanup"\n')
+    cfg = load_config(path)
+    assert cfg.summary_model != "mlx-community/old-summary"
+    assert cfg.dictation.model == "local-cleanup"
+    assert cfg.cloud is False
+    assert "unknown setting model" in caplog.text
+
+
 def test_existing_settings_are_kept(tmp_path):
     path = tmp_path / "config.toml"
     path.write_text('me = "Андрей"\n')

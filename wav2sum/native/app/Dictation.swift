@@ -16,18 +16,22 @@ final class Hotkey {
     var onPress: ((_ shift: Bool, _ control: Bool) -> Void)?
     var onRelease: (() -> Void)?
     var onKeyDown: ((_ keyCode: Int64) -> Void)?
+    var onMouseDown: ((_ location: CGPoint?) -> Void)?
 
     private var tap: CFMachPort?
     private var source: CFRunLoopSource?
-    private var isDown = false
+    private(set) var isDown = false
 
     var isActive: Bool { tap.map { CGEvent.tapIsEnabled(tap: $0) } ?? false }
+    private(set) var releasedAt: CFTimeInterval = 0
 
     func start() -> Bool {
         if isActive { return true }
         guard CGPreflightListenEventAccess() else { return false }
         stop()
         let mask = (1 << CGEventType.flagsChanged.rawValue) | (1 << CGEventType.keyDown.rawValue)
+            | (1 << CGEventType.leftMouseDown.rawValue) | (1 << CGEventType.rightMouseDown.rawValue)
+            | (1 << CGEventType.otherMouseDown.rawValue)
         tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap, place: .headInsertEventTap, options: .listenOnly,
             eventsOfInterest: CGEventMask(mask),
@@ -54,22 +58,30 @@ final class Hotkey {
     private func handle(_ type: CGEventType, _ event: CGEvent) {
         switch type {
         case .tapDisabledByTimeout, .tapDisabledByUserInput:
+            onMouseDown?(nil) // Input could have been missed while the tap was disabled.
             if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
         case .keyDown:
             onKeyDown?(event.getIntegerValueField(.keyboardEventKeycode))
+        case .leftMouseDown, .rightMouseDown, .otherMouseDown:
+            onMouseDown?(event.location)
         case .flagsChanged where event.getIntegerValueField(.keyboardEventKeycode) == key.keyCode:
-            let pressed = event.flags.contains(key.flag)
-            if pressed && !isDown {
-                isDown = true
-                Log.write("hotkey down")
-                onPress?(event.flags.contains(.maskShift), event.flags.contains(.maskControl))
-            } else if !pressed && isDown {
-                isDown = false
-                Log.write("hotkey up")
-                onRelease?()
-            }
+            updateKey(pressed: event.flags.contains(key.flag), shift: event.flags.contains(.maskShift),
+                      control: event.flags.contains(.maskControl))
         default:
             break
+        }
+    }
+
+    func updateKey(pressed: Bool, shift: Bool, control: Bool) {
+        if pressed && !isDown {
+            isDown = true
+            Log.write("hotkey down")
+            onPress?(shift, control)
+        } else if !pressed && isDown {
+            isDown = false
+            releasedAt = CACurrentMediaTime()
+            Log.write("hotkey up")
+            onRelease?()
         }
     }
 }
@@ -182,6 +194,24 @@ final class Microphone {
     }
 }
 
+private final class HUDBackground: NSVisualEffectView {
+    var onDrag: ((NSPoint, NSPoint) -> Void)?
+    private var dragOffset = NSPoint.zero
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        guard let window else { return }
+        let point = window.convertPoint(toScreen: event.locationInWindow)
+        dragOffset = NSPoint(x: point.x - window.frame.minX, y: point.y - window.frame.minY)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let window else { return }
+        onDrag?(window.convertPoint(toScreen: event.locationInWindow), dragOffset)
+    }
+}
+
 final class HUD {
     enum State { case listening(command: Bool, translate: Bool), thinking, success }
 
@@ -189,24 +219,56 @@ final class HUD {
     private let label = NSTextField(labelWithString: "")
     private let meter = LevelView()
     private let check = CheckmarkView()
+    private let scroll = NSScrollView()
+    private let preview = NSTextView()
     private var generation = 0
+    private var positioned = false
+    private var localOrigin: NSPoint?
+    private var screenObserver: NSObjectProtocol?
+    var cloud = false
 
     init() {
-        panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 190, height: 40),
+        panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 320, height: 80),
                         styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: true)
         panel.level = .statusBar
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = true
-        panel.ignoresMouseEvents = true
+        panel.animationBehavior = .none
+        panel.becomesKeyOnlyIfNeeded = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        panel.title = "Dictation preview"
 
-        let background = NSVisualEffectView(frame: panel.contentRect(forFrameRect: panel.frame))
+        let background = HUDBackground(frame: panel.contentRect(forFrameRect: panel.frame))
         background.material = .hudWindow
         background.state = .active
         background.wantsLayer = true
         background.layer?.cornerRadius = 20
         panel.contentView = background
+        background.autoresizingMask = [.width, .height]
+        background.toolTip = "Drag to move"
+        background.onDrag = { [weak self] point, offset in
+            self?.move(to: point, offset: offset)
+        }
+
+        scroll.drawsBackground = false
+        scroll.hasVerticalScroller = false
+        scroll.borderType = .noBorder
+        preview.isEditable = false
+        preview.isSelectable = false
+        preview.drawsBackground = false
+        preview.font = .systemFont(ofSize: 14)
+        preview.textColor = .labelColor
+        preview.textContainerInset = .zero
+        preview.textContainer?.lineFragmentPadding = 0
+        preview.isVerticallyResizable = true
+        preview.isHorizontallyResizable = false
+        preview.textContainer?.widthTracksTextView = true
+        preview.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        preview.textContainer?.containerSize = NSSize(width: 288, height: CGFloat.greatestFiniteMagnitude)
+        scroll.documentView = preview
+        scroll.isHidden = true
+        background.addSubview(scroll)
 
         label.font = .systemFont(ofSize: 13, weight: .medium)
         label.textColor = .labelColor
@@ -216,14 +278,27 @@ final class HUD {
         background.addSubview(label)
         background.addSubview(meter)
         background.addSubview(check)
+
+        screenObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self, self.positioned || self.cloud else { return }
+            self.layout()
+        }
+    }
+
+    deinit {
+        if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) }
     }
 
     func show(_ state: State) {
         generation += 1
         panel.alphaValue = 1
+        panel.ignoresMouseEvents = cloud
         check.isHidden = true
         switch state {
         case .listening(let command, let translate):
+            clearPreview()
             label.stringValue = command ? "● Command" : translate ? "● English" : "● Listening"
             label.textColor = .systemRed
             meter.isHidden = false
@@ -233,6 +308,7 @@ final class HUD {
             label.textColor = .secondaryLabelColor
             meter.isHidden = true
         case .success:
+            clearPreview()
             label.stringValue = "Success"
             label.textColor = .systemGreen
             meter.isHidden = true
@@ -240,17 +316,67 @@ final class HUD {
             check.animate()
             fadeOut(after: 1.0)
         }
-        if let screen = NSScreen.main {
-            let frame = screen.visibleFrame
-            panel.setFrameOrigin(NSPoint(x: frame.midX - panel.frame.width / 2, y: frame.minY + 60))
-        }
+        layout()
+        if !scroll.isHidden { preview.scrollToEndOfDocument(nil) }
         panel.orderFrontRegardless()
     }
 
     func level(_ rms: Float) { meter.push(rms) }
 
+    func contains(mouseLocation: CGPoint?) -> Bool {
+        guard panel.isVisible, let mouseLocation, let primary = NSScreen.screens.first else { return false }
+        let point = NSPoint(x: mouseLocation.x, y: primary.frame.maxY - mouseLocation.y)
+        return NSWindow.windowNumber(at: point, belowWindowWithWindowNumber: 0) == panel.windowNumber
+    }
+
+    func setPreview(_ text: String) {
+        preview.string = text
+        scroll.isHidden = text.isEmpty
+        if let container = preview.textContainer { preview.layoutManager?.ensureLayout(for: container) }
+        preview.scrollToEndOfDocument(nil)
+    }
+
+    private func clearPreview() {
+        preview.string = ""
+        scroll.isHidden = true
+    }
+
+    private func move(to point: NSPoint, offset: NSPoint) {
+        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(point) })
+            ?? panel.screen ?? NSScreen.main ?? NSScreen.screens.first else {
+            return
+        }
+        layout(on: screen, origin: NSPoint(x: point.x - offset.x, y: point.y - offset.y))
+    }
+
+    private func layout(on selectedScreen: NSScreen? = nil, origin: NSPoint? = nil) {
+        let localScreen = localOrigin.flatMap { point in NSScreen.screens.first { $0.frame.contains(point) } }
+        guard let screen = selectedScreen ?? (!cloud && positioned ? localScreen : NSScreen.main)
+            ?? NSScreen.main ?? NSScreen.screens.first else { return }
+        let visible = screen.visibleFrame
+        let width = min(cloud ? 190 : 320, visible.width)
+        let height = min(cloud ? 40 : 80, visible.height)
+        let initial = cloud
+            ? NSPoint(x: visible.midX - width / 2, y: visible.minY + 60)
+            : NSPoint(x: visible.maxX - width - 16, y: visible.minY + 16)
+        let desired = cloud ? initial : (origin ?? localOrigin ?? initial)
+        let x = max(visible.minX, min(desired.x, visible.maxX - width))
+        let y = max(visible.minY, min(desired.y, visible.maxY - height))
+        panel.setFrame(NSRect(x: x, y: y, width: width, height: height), display: true)
+        if !cloud {
+            positioned = true
+            localOrigin = NSPoint(x: x, y: y)
+        }
+        label.frame = NSRect(x: 16, y: height - 29, width: 100, height: 18)
+        meter.frame = NSRect(x: width - 70, y: height - 30, width: 54, height: 20)
+        check.frame = NSRect(x: width - 40, y: height - 30, width: 20, height: 20)
+        scroll.frame = NSRect(x: 16, y: 12, width: max(0, width - 32), height: max(0, height - 50))
+        preview.setFrameSize(NSSize(width: max(0, width - 32), height: max(preview.frame.height, height - 50)))
+    }
+
     func hide() {
         generation += 1
+        clearPreview()
         panel.orderOut(nil)
     }
 
@@ -415,9 +541,134 @@ enum FocusedApp {
         AXIsProcessTrustedWithOptions([kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: prompt] as CFDictionary)
     }
 
-    private static func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
+    static func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
         var value: CFTypeRef?
         return AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success ? value : nil
+    }
+}
+
+/// Once the target changes, returning to it does not make an in-flight paste safe again.
+final class PasteTarget {
+    private let pid: pid_t?
+    private let window: AXUIElement?
+    private let element: AXUIElement?
+    private let value: String?
+    private let selection: CFTypeRef?
+    private var changed = false
+    private var timer: Timer?
+    private var activation: NSObjectProtocol?
+
+    init() {
+        let processID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        pid = processID
+        if let processID, let focusedWindow = FocusedApp.attribute(AXUIElementCreateApplication(processID), kAXFocusedWindowAttribute) {
+            window = (focusedWindow as! AXUIElement)
+        } else {
+            window = nil
+        }
+        let focused = FocusedApp.focusedElement
+        element = focused
+        value = focused.flatMap { FocusedApp.text(of: $0) }
+        selection = focused.flatMap { FocusedApp.attribute($0, kAXSelectedTextRangeAttribute) }
+        activation = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
+        ) { [weak self] notification in
+            guard let self,
+                  let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            else { return }
+            if app.processIdentifier != self.pid { self.changed = true }
+        }
+        timer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
+            self?.check()
+        }
+    }
+
+    func invalidate() { changed = true }
+
+    func stop() {
+        timer?.invalidate()
+        timer = nil
+        if let activation { NSWorkspace.shared.notificationCenter.removeObserver(activation) }
+        activation = nil
+    }
+
+    func canPaste(inputMonitoring: Bool) -> Bool {
+        check()
+        // A generic app/window AX element cannot identify the field. Text may be unavailable
+        // even for a real field; in that case monitored input plus stable identity is required.
+        let role = element.flatMap { FocusedApp.attribute($0, kAXRoleAttribute) as? String }
+        return !changed && inputMonitoring && (role == kAXTextFieldRole as String || role == kAXTextAreaRole as String)
+    }
+
+    func observeInsertion(_ text: String, session: String, releasedAt: CFTimeInterval,
+                          readyAt: CFTimeInterval, sentAt: CFTimeInterval, completion: @escaping () -> Void) {
+        guard let element, let value, let selection,
+              CFGetTypeID(selection) == AXValueGetTypeID(),
+              AXValueGetType(selection as! AXValue) == .cfRange else {
+            Log.write("dictation insertion session=\(session) unavailable: target text/selection")
+            completion()
+            return
+        }
+        var range = CFRange()
+        let field = value as NSString
+        guard AXValueGetValue(selection as! AXValue, .cfRange, &range),
+              range.location >= 0, range.location <= field.length,
+              range.length >= 0, range.length <= field.length - range.location else {
+            Log.write("dictation insertion session=\(session) unavailable: invalid selection")
+            completion()
+            return
+        }
+        let expected = field.replacingCharacters(in: NSRange(location: range.location, length: range.length), with: text)
+        guard expected != value else {
+            Log.write("dictation insertion session=\(session) unavailable: unchanged value")
+            completion()
+            return
+        }
+        var lower = sentAt
+        Timer.scheduledTimer(withTimeInterval: 0.025, repeats: true) { timer in
+            let started = CACurrentMediaTime()
+            guard started - sentAt < 2 else {
+                timer.invalidate()
+                Log.write("dictation insertion session=\(session) unconfirmed: timeout")
+                completion()
+                return
+            }
+            let current = FocusedApp.text(of: element)
+            let observed = CACurrentMediaTime()
+            if current == expected {
+                timer.invalidate()
+                let ready = Int((readyAt - releasedAt) * 1000)
+                let sent = Int((sentAt - releasedAt) * 1000)
+                let first = Int((lower - releasedAt) * 1000)
+                let last = Int(ceil((observed - releasedAt) * 1000))
+                Log.write("dictation insertion session=\(session) ready_ms=\(ready) sent_ms=\(sent) observed_ms=\(first)..\(last)")
+                completion()
+            } else if current == nil {
+                timer.invalidate()
+                Log.write("dictation insertion session=\(session) unavailable: target text")
+                completion()
+            } else {
+                lower = started
+            }
+        }
+    }
+
+    private func check() {
+        guard !changed else { return }
+        guard let pid, NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
+              let element, let current = FocusedApp.focusedElement, CFEqual(element, current)
+        else { changed = true; return }
+        if let window {
+            guard let currentWindow = FocusedApp.attribute(AXUIElementCreateApplication(pid), kAXFocusedWindowAttribute),
+                  CFEqual(window, currentWindow) else { changed = true; return }
+        }
+        if FocusedApp.text(of: current) != value { changed = true; return }
+        let currentSelection = FocusedApp.attribute(current, kAXSelectedTextRangeAttribute)
+        switch (selection, currentSelection) {
+        case (nil, nil): break
+        case let (old?, new?) where CFEqual(old, new): break
+        default: changed = true
+        }
     }
 }
 
@@ -468,11 +719,26 @@ final class CorrectionWatcher {
     private var timer: Timer?
     private var waiting: Timer?
     private var deadline = Date.distantPast
+    private var tracking = false
+    private var finishing = false
+    var busyForHandoff: Bool { tracking || finishing }
+
+    private let prepare: () -> String
+    private let focusedElement: () -> AXUIElement?
+    private let text: (AXUIElement) -> String?
+
+    init(prepare: @escaping () -> String = { FocusedApp.exposeTextFields(); return FocusedApp.bundleID ?? "" },
+         focusedElement: @escaping () -> AXUIElement? = { FocusedApp.focusedElement },
+         text: @escaping (AXUIElement) -> String? = FocusedApp.text) {
+        self.prepare = prepare
+        self.focusedElement = focusedElement
+        self.text = text
+    }
 
     func track(_ text: String) {
         finish()
-        FocusedApp.exposeTextFields()
-        let app = FocusedApp.bundleID ?? ""
+        tracking = true
+        let app = prepare()
         let deadline = Date().addingTimeInterval(30)
         waiting = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] timer in
             guard let self else { return timer.invalidate() }
@@ -480,15 +746,17 @@ final class CorrectionWatcher {
                 Log.write("corrections: pasted text not found in \(app)")
                 return self.finish()
             }
-            guard let element = FocusedApp.focusedElement, FocusedApp.text(of: element)?.contains(text) == true else { return }
+            guard let element = self.focusedElement(), self.text(element)?.contains(text) == true else { return }
             self.waiting?.invalidate()
             self.waiting = nil
             Log.write("corrections: following the text in \(app)")
-            self.begin(element, text)
+            if !self.begin(element, text) { self.finish() }
         }
     }
 
     func finish() {
+        finishing = true
+        defer { tracking = false; finishing = false }
         waiting?.invalidate()
         waiting = nil
         if timer != nil { read() }
@@ -502,8 +770,8 @@ final class CorrectionWatcher {
         edited = nil
     }
 
-    private func begin(_ element: AXUIElement, _ text: String) {
-        guard let value = FocusedApp.text(of: element), let range = value.range(of: text, options: .backwards) else { return }
+    private func begin(_ element: AXUIElement, _ text: String) -> Bool {
+        guard let value = self.text(element), let range = value.range(of: text, options: .backwards) else { return false }
         self.element = element
         original = text
         before = String(value[..<range.lowerBound].suffix(40))
@@ -513,14 +781,15 @@ final class CorrectionWatcher {
             guard let self else { return }
             if Date() > self.deadline || !self.read() { self.finish() }
         }
+        return true
     }
 
     /// False once the text can't be followed any more; while another field has the focus it just waits.
     @discardableResult
     private func read() -> Bool {
         guard let element else { return false }
-        guard let focused = FocusedApp.focusedElement, CFEqual(focused, element) else { return true }
-        guard let value = FocusedApp.text(of: element),
+        guard let focused = focusedElement(), CFEqual(focused, element) else { return true }
+        guard let value = self.text(element),
               let region = Self.region(in: value, between: before, and: after)
         else { return false }
         edited = region
@@ -541,13 +810,21 @@ final class DictationController {
     var onBusyChange: ((Bool) -> Void)?
 
     let hotkey = Hotkey()
-    let corrections = CorrectionWatcher()
-    private let mic = Microphone()
-    private let hud = HUD()
+    let corrections: CorrectionWatcher
+    private let effects: Effects
     private let daemon: DaemonClient
 
-    private enum Phase { case idle, recording, handsFree, processing }
+    private enum Phase { case idle, starting, recording, handsFree, processing }
     private var phase = Phase.idle
+    private var pendingSelections = 0
+    private var pendingProbes = 0
+    private var startingCalls = 0
+    private var finishingReplies = 0
+    var busyForHandoff: Bool {
+        phase != .idle || hotkey.isDown || pendingSelections > 0 || pendingProbes > 0
+            || startingCalls > 0 || finishingReplies > 0 || corrections.busyForHandoff
+    }
+
     private var pressedAt = Date.distantPast
     private var lastTapAt = Date.distantPast
     private var context: JSON = [:]
@@ -555,16 +832,79 @@ final class DictationController {
     private var translate = false
     private var streamTimer: Timer?
     private var streamed = false
+    private var session: String?
 
     private let tapWindow = 0.3
     private let doubleTapWindow = 0.4
 
-    init(daemon: DaemonClient) {
+    struct Effects {
+        var audio: (start: () throws -> Void, stop: () -> [Float], take: () -> [Float])
+        var context: (_ aroundCursor: Bool) -> JSON
+        var selectedText: (@escaping (String?) -> Void) -> Void
+        typealias Insertion = (String, String, CFTimeInterval, CFTimeInterval, @escaping () -> Void) -> Void
+        var target: (begin: () -> Void, invalidate: () -> Void, stop: () -> Void, finish: () -> Insertion?)
+        var hud: (show: (HUD.State?) -> Void, preview: (String) -> Void, contains: (CGPoint?) -> Bool)
+        var request: (String, JSON, ((JSON) -> Void)?) -> Void
+        var copy: (String) -> Void
+
+        static func live(daemon: DaemonClient, hotkey: Hotkey) -> Effects {
+            let mic = Microphone(), hud = HUD()
+            var target: PasteTarget?
+            mic.onLevel = { hud.level($0) }
+            return Effects(
+                audio: (mic.start, mic.stop, mic.take),
+                context: { around in
+                    if !around { return ["app": FocusedApp.bundleID ?? "", "title": FocusedApp.windowTitle ?? ""] }
+                    guard let text = FocusedApp.textAroundCursor() else { return [:] }
+                    return ["before": text.before, "after": text.after]
+                },
+                selectedText: FocusedApp.selectedText,
+                target: (begin: { FocusedApp.exposeTextFields(); target = PasteTarget() },
+                         invalidate: { target?.invalidate() }, stop: { target?.stop(); target = nil },
+                         finish: {
+                    let saved = target
+                    let paste = saved?.canPaste(inputMonitoring: hotkey.isActive) == true
+                    saved?.stop(); target = nil
+                    guard paste, let saved else { return nil }
+                    return { text, session, releasedAt, readyAt, done in
+                        let sentAt = CACurrentMediaTime()
+                        Keyboard.press(9, flags: .maskCommand)
+                        saved.observeInsertion(text, session: session, releasedAt: releasedAt,
+                                               readyAt: readyAt, sentAt: sentAt, completion: done)
+                    }
+                }),
+                hud: (show: { state in
+                    hud.cloud = daemon.cloud
+                    if let state { hud.show(state) } else { hud.hide() }
+                }, preview: hud.setPreview, contains: hud.contains),
+                request: { daemon.request($0, $1, reply: $2) }, copy: Clipboard.copy)
+        }
+    }
+
+    init(daemon: DaemonClient, effects: Effects? = nil, corrections: CorrectionWatcher = CorrectionWatcher()) {
         self.daemon = daemon
-        mic.onLevel = { [weak self] in self?.hud.level($0) }
+        self.effects = effects ?? .live(daemon: daemon, hotkey: hotkey)
+        self.corrections = corrections
         hotkey.onPress = { [weak self] in self?.pressed(shift: $0, control: $1) }
         hotkey.onRelease = { [weak self] in self?.released() }
         hotkey.onKeyDown = { [weak self] in self?.keyDown($0) }
+        hotkey.onMouseDown = { [weak self] location in
+            guard let self, !self.effects.hud.contains(location) else { return }
+            self.effects.target.invalidate()
+        }
+    }
+
+    func receive(event: JSON) {
+        guard event["event"] as? String == "dictation_preview",
+              let session, event["session"] as? String == session,
+              phase == .recording || phase == .handsFree || phase == .processing,
+              let text = event["text"] as? String else { return }
+        effects.hud.preview(text)
+    }
+
+    func disconnected() {
+        if phase != .idle { cancel() }
+        else { effects.hud.show(nil) }
     }
 
     private func pressed(shift: Bool, control: Bool) {
@@ -574,109 +914,164 @@ final class DictationController {
         }
         switch phase {
         case .idle:
+            guard startingCalls == 0, finishingReplies == 0 else { return }
             pressedAt = Date()
             let doubleTap = pressedAt.timeIntervalSince(lastTapAt) < doubleTapWindow
             begin(command: shift, translate: control && !shift, handsFree: doubleTap)
         case .handsFree:
             finish()
-        case .recording, .processing:
+        case .starting, .recording, .processing:
             break
         }
     }
 
     private func released() {
+        if phase == .starting { cancel(); return }
         guard phase == .recording else { return }
         if Date().timeIntervalSince(pressedAt) < tapWindow {
             lastTapAt = Date()
             cancel()
         } else {
-            finish()
+            finish(releasedAt: hotkey.releasedAt)
         }
     }
 
     private func keyDown(_ keyCode: Int64) {
         switch phase {
         case .recording: cancel()
-        case .handsFree where keyCode == 53: cancel()
+        case .handsFree, .processing:
+            if keyCode == 53 { cancel() } else { effects.target.invalidate() }
         default: break
         }
     }
 
     private func begin(command: Bool, translate: Bool, handsFree: Bool) {
+        startingCalls += 1
+        defer { startingCalls -= 1 }
+        phase = .starting
+        let session = UUID().uuidString
+        self.session = session
         corrections.finish()
+        guard phase == .starting, self.session == session else { return }
         self.command = command
         self.translate = translate
-        context = ["app": FocusedApp.bundleID ?? "", "title": FocusedApp.windowTitle ?? "", "command": command, "translate": translate]
+        context = effects.context(false)
+        context["command"] = command
+        context["translate"] = translate
         if command {
-            FocusedApp.selectedText { [weak self] text in self?.context["selection"] = text ?? "" }
+            pendingSelections += 1
+            let selected: (String?) -> Void = { [weak self] text in
+                guard let self else { return }
+                defer { self.pendingSelections -= 1 }
+                guard self.session == session else { return }
+                self.context["selection"] = text ?? ""
+            }
+            effects.selectedText(selected)
         }
+        guard phase == .starting, self.session == session else { return }
         do {
-            try mic.start()
+            try effects.audio.start()
         } catch {
             Log.write("microphone failed: \(error)")
+            self.session = nil
+            phase = .idle
+            return
+        }
+        guard phase == .starting, self.session == session else {
+            _ = effects.audio.stop()
             return
         }
         phase = handsFree ? .handsFree : .recording
-        hud.show(.listening(command: command, translate: translate))
+        effects.target.begin()
+        effects.hud.show(.listening(command: command, translate: translate))
         onBusyChange?(true)
-        // The daemon recognizes finished phrases while the user is still speaking.
+        // Cloud sends small PCM frames; local coalesces audio while one recognition is in flight.
         streamed = false
-        streamTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in self?.stream() }
+        streamTimer = Timer.scheduledTimer(withTimeInterval: daemon.cloud ? 0.25 : 1, repeats: true) { [weak self] _ in self?.stream() }
         // Read after the microphone starts: a slow field must not cut off the first word.
-        if !command, let around = FocusedApp.textAroundCursor() {
-            context["before"] = around.before
-            context["after"] = around.after
-        }
+        if !command { context.merge(effects.context(true)) { _, new in new } }
     }
 
     private func stream() {
-        let chunk = mic.take()
+        guard let session else { return }
+        let chunk = effects.audio.take()
         guard !chunk.isEmpty else { return }
-        daemon.request("dictate_audio", ["audio": Self.encode(chunk), "first": !streamed])
+        var request: JSON = ["audio": Self.encode(chunk), "first": !streamed, "session": session]
+        if !streamed {
+            request["app"] = context["app"]
+            request["title"] = context["title"]
+        }
+        effects.request("dictate_audio", request, nil)
         streamed = true
     }
 
-    private func cancel() {
+    func cancel() {
+        guard phase != .idle else { return }
         streamTimer?.invalidate()
-        _ = mic.stop()
+        streamTimer = nil
+        if phase == .recording || phase == .handsFree {
+            _ = effects.audio.stop()
+        }
+        if streamed, let session { effects.request("dictate_cancel", ["session": session], nil) }
+        session = nil
+        streamed = false
+        effects.target.stop()
+        effects.hud.show(nil)
         phase = .idle
-        hud.hide()
         onBusyChange?(false)
     }
 
-    private func finish() {
+    func finish(releasedAt: CFTimeInterval = CACurrentMediaTime()) {
         streamTimer?.invalidate()
-        let samples = mic.stop()
+        streamTimer = nil
+        let samples = effects.audio.stop()
+        phase = .processing
         guard samples.count > 16_000 / 4 else {
             Log.write("too short: \(samples.count) samples")
             cancel()
             return
         }
         Log.write("dictating \(samples.count / 16) ms from \(context["app"] ?? "")")
-        phase = .processing
-        hud.show(.thinking)
+        guard let session else { cancel(); return }
+        effects.hud.show(.thinking)
+        stream()
 
         var request = context
-        request["audio"] = Self.encode(mic.take())
+        request["audio"] = Self.encode(effects.audio.take())
         request["streamed"] = streamed
-        daemon.request("dictate", request) { [weak self] reply in
-            guard let self else { return }
-            self.phase = .idle
-            self.onBusyChange?(false)
+        request["session"] = session
+        let completion: (JSON) -> Void = { [weak self] reply in
+            guard let self, self.session == session, self.phase == .processing else { return }
+            self.finishingReplies += 1
+            defer { self.finishingReplies -= 1 }
+            self.session = nil
+            self.streamed = false
+            let insert = self.effects.target.finish()
             if let text = reply["text"] as? String, !text.isEmpty {
+                let readyAt = CACurrentMediaTime()
+                Log.write("dictation ready after \(Int((readyAt - releasedAt) * 1000)) ms")
                 Log.write("copying \(text.count) chars to the clipboard")
-                Clipboard.copy(text)
-                if FocusedApp.bundleID == self.context["app"] as? String { Keyboard.press(9, flags: .maskCommand) }
-                self.hud.show(.success)
-                if !self.command && !self.translate { self.corrections.track(text) }
+                self.effects.copy(text)
+                if let insert {
+                    self.pendingProbes += 1
+                    let done: () -> Void = { [weak self] in self?.pendingProbes -= 1 }
+                    insert(text, session, releasedAt, readyAt, done)
+                } else {
+                    Log.write("dictation target changed or unavailable; kept text on clipboard")
+                }
+                self.effects.hud.show(.success)
+                if insert != nil && !self.command && !self.translate { self.corrections.track(text) }
             } else {
-                self.hud.hide()
+                self.effects.hud.show(nil)
                 if let error = reply["error"] as? String {
                     Log.write("dictation failed: \(error)")
                     NSSound.beep()
                 }
             }
+            self.phase = .idle
+            self.onBusyChange?(false)
         }
+        effects.request("dictate", request, completion)
     }
 
     private static func encode(_ samples: [Float]) -> String {

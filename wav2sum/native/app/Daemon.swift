@@ -6,6 +6,7 @@ final class DaemonClient {
     var onEvent: ((JSON) -> Void)?
     var onDisconnect: (() -> Void)?
     private(set) var isConnected = false
+    var cloud = false
 
     private var fd: Int32 = -1
     private var nextID = 1
@@ -15,6 +16,9 @@ final class DaemonClient {
     func connect(path: String) -> Bool {
         let s = socket(AF_UNIX, SOCK_STREAM, 0)
         guard s >= 0 else { return false }
+        var noSigPipe: Int32 = 1
+        guard setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout.size(ofValue: noSigPipe))) == 0
+        else { close(s); return false }
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
         let bytes = Array(path.utf8CString)
@@ -50,6 +54,7 @@ final class DaemonClient {
         var message = params
         message["id"] = id
         message["cmd"] = cmd
+        message["cloud"] = cloud
         guard var data = try? JSONSerialization.data(withJSONObject: message) else { return }
         data.append(0x0A)
         let fd = self.fd
@@ -122,19 +127,93 @@ enum Log {
 enum DaemonProcess {
     static let socketPath = Log.directory + "/daemon.sock"
 
-    static func start() {
-        guard let command = Bundle.main.object(forInfoDictionaryKey: "W2SServeCommand") as? [String] else {
-            Log.write("W2SServeCommand missing from Info.plist")
+    private static func command(_ action: String) -> (URL, [String], [String: String])? {
+        let bundle = Bundle.main
+        var environment = ProcessInfo.processInfo.environment
+        if bundle.object(forInfoDictionaryKey: "W2SBundledRuntime") as? Bool == true,
+           let resources = bundle.resourceURL {
+            let root = resources.appendingPathComponent("python")
+            let helpers = bundle.bundleURL.appendingPathComponent("Contents/Helpers")
+            let python = root.appendingPathComponent("bin/python3")
+            guard FileManager.default.isExecutableFile(atPath: python.path) else { return nil }
+            for key in environment.keys.filter({ $0.hasPrefix("PYTHON") || $0.hasPrefix("DYLD_") || $0 == "VIRTUAL_ENV" || $0 == "__PYVENV_LAUNCHER__" }) {
+                environment.removeValue(forKey: key)
+            }
+            environment["PYTHONHOME"] = root.path
+            environment["PYTHONNOUSERSITE"] = "1"
+            environment["PYTHONDONTWRITEBYTECODE"] = "1"
+            environment["PATH"] = helpers.path + ":/usr/bin:/bin:/usr/sbin:/sbin"
+            let capture = helpers.appendingPathComponent("wav2sum-capture")
+            if FileManager.default.isExecutableFile(atPath: capture.path) {
+                environment["WAV2SUM_CAPTURE_HELPER"] = capture.path
+            }
+            return (python, ["-m", "wav2sum", action], environment)
+        }
+        guard let serve = bundle.object(forInfoDictionaryKey: "W2SServeCommand") as? [String],
+              serve.count >= 2, serve.last == "serve" else { return nil }
+        return (URL(fileURLWithPath: serve[0]), Array(serve.dropFirst().dropLast()) + [action], environment)
+    }
+
+    static func start(cloud: Bool) {
+        guard let (executable, arguments, environment) = command("serve") else {
+            Log.write("daemon runtime unavailable")
             return
         }
-        let shell = String(cString: getpwuid(getuid()).pointee.pw_shell)
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: shell)
-        process.arguments = ["-l", "-c", "exec " + command.map(shellQuote).joined(separator: " ")]
+        process.environment = environment
+        if Bundle.main.object(forInfoDictionaryKey: "W2SBundledRuntime") as? Bool == true {
+            process.executableURL = executable
+            process.arguments = arguments + (cloud ? ["--cloud"] : [])
+        } else {
+            let shell = String(cString: getpwuid(getuid()).pointee.pw_shell)
+            process.executableURL = URL(fileURLWithPath: shell)
+            process.arguments = ["-l", "-c", "exec " + ([executable.path] + arguments + (cloud ? ["--cloud"] : [])).map(shellQuote).joined(separator: " ")]
+        }
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
-        Log.write("starting daemon via \(shell)")
-        do { try process.run() } catch { Log.write("failed to start daemon: \(error)") }
+        do { try process.run() } catch { Log.write("failed to start daemon") }
+    }
+
+    static func setup(_ request: JSON, completion: @escaping (JSON) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            var reply: JSON = ["ok": false, "error": "Setup helper is unavailable."]
+            if let (executable, arguments, environment) = command("setup"),
+               let input = try? JSONSerialization.data(withJSONObject: request) {
+                let process = Process()
+                let stdin = Pipe()
+                let stdout = Pipe()
+                process.executableURL = executable
+                process.arguments = arguments
+                process.environment = environment
+                process.standardInput = stdin
+                process.standardOutput = stdout
+                process.standardError = FileHandle.nullDevice
+                do {
+                    try process.run()
+                    stdin.fileHandleForWriting.write(input)
+                    stdin.fileHandleForWriting.closeFile()
+                    let output = stdout.fileHandleForReading.readDataToEndOfFile()
+                    process.waitUntilExit()
+                    if let parsed = (try? JSONSerialization.jsonObject(with: output)) as? JSON {
+                        reply = parsed
+                    } else {
+                        reply = ["ok": false, "error": "Setup helper returned an invalid response."]
+                    }
+                } catch {
+                    reply = ["ok": false, "error": "Could not start the setup helper."]
+                }
+            }
+            if var error = reply["error"] as? String {
+                for key in ["deepgram", "openai", "hf_token"] {
+                    if let secret = request[key] as? String, !secret.isEmpty {
+                        error = error.replacingOccurrences(of: secret, with: "[redacted]")
+                    }
+                }
+                reply["error"] = error
+            }
+            let result = reply
+            DispatchQueue.main.async { completion(result) }
+        }
     }
 
     private static func shellQuote(_ s: String) -> String {

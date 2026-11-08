@@ -14,7 +14,7 @@ from textual.containers import Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Input, Markdown, Static
 
-from wav2sum.client import DaemonClient, DaemonError
+from wav2sum.client import DaemonClient, DaemonError, DaemonUnavailable
 from wav2sum.config import LOG_PATH, Config
 from wav2sum.history import CAN_TRASH, delete_call, delete_dictation, load_dictations
 
@@ -111,6 +111,8 @@ class Wav2SumTUI(App):
         self.cfg = cfg
         self.client: DaemonClient | None = None
         self.status: dict = {}
+        self.connection_error: str | None = None
+        self.connecting = False
         self.levels = (-120.0, -120.0)
         self.dictations: list[dict] = []
         self.raw_calls: set[str] = set()
@@ -273,21 +275,37 @@ class Wav2SumTUI(App):
     @work(exclusive=True)
     async def follow_daemon(self) -> None:
         while True:
+            client = None
+            self.connecting = True
             try:
-                self.client = await DaemonClient.connect()
+                client = await DaemonClient.connect(cloud=self.cfg.cloud)
                 # Subscribe returns an atomic snapshot. events() subscribes again, but the first
                 # subscription already queues every intervening event on this connection.
-                self.status = await self.client.request("subscribe")
+                self.status = await client.request("subscribe")
+                if self.status.get("cloud", False) != self.cfg.cloud:
+                    raise DaemonError("background process mode mismatch")
+                self.client = client
+                self.connecting = False
                 self.render_jobs()
                 self.load_calls()
-                async for event in self.client.events():
+                async for event in client.events():
                     self.handle(event)
-            except DaemonError:
+            except DaemonUnavailable:
                 pass
+            except DaemonError as e:
+                self.connection_error = str(e)
+                self.notify(self.connection_error, severity="error")
+            finally:
+                self.connecting = False
+                if client:
+                    await client.close()
             self.client = None
             self.status = {}
             self.render_jobs()
             self.load_calls()
+            if self.connection_error:
+                self.refresh_status()
+                return
             await asyncio.sleep(2)
 
     def handle(self, event: dict) -> None:
@@ -308,26 +326,33 @@ class Wav2SumTUI(App):
                 self.render_jobs()
                 self.load_calls()
                 if event["state"] == "done":
-                    self.notify(f"Summary ready: {Path(event['out_dir']).name}")
+                    self.notify(f"Result ready: {Path(event['out_dir']).name}")
                 elif event["state"] == "failed":
                     self.notify(f"Processing failed: {event['error']}", severity="error")
             case "dictation":
                 self.dictations.insert(0, payload)
                 self.render_dictations()
+            case "history_pruned":
+                self.load_dictations()
 
     def refresh_status(self) -> None:
-        if not self.client:
+        mode = "cloud" if self.cfg.cloud else "local"
+        if self.connection_error:
+            lines = [f"[red]○ {mode} mode: {self.connection_error}[/]"]
+        elif not self.client:
             lines = ["[dim]○ background process is off[/]", "", "[b]d[/] to start it"]
         elif self.status.get("state") != "ready":
-            lines = ["[yellow]◌ loading models…[/]"]
+            lines = [f"[yellow]◌ {mode} mode: loading models…[/]"]
         else:
             memory = self.status.get("memory_mb", 0) + self.status.get("llm_memory_mb", 0)
             lines = [
-                "[green]● ready[/]",
+                f"[green]● ready · {mode}[/]",
                 f"memory  {memory / 1024:.1f} GB  [dim](models {self.status.get('memory_mb', 0)} MB · "
                 f"LLM {self.status.get('llm_memory_mb', 0)} MB)[/]",
                 f"dictation  hold {_hotkey_label(self.status.get('hotkey', ''))}",
             ]
+        if not self.client and not self.connection_error:
+            lines.insert(0, f"mode  {mode}")
         if recording := self.status.get("recording"):
             mic, system = self.levels
             lines.append(f"[red]● rec {_clock(recording.get('seconds', 0))}[/]  me {_bar(mic)}  them {_bar(system)}")
@@ -380,13 +405,19 @@ class Wav2SumTUI(App):
             self.load_calls()
 
     async def action_daemon(self) -> None:
+        if self.connecting:
+            self.notify("Checking background process mode", severity="warning")
+            return
+        if self.connection_error:
+            self.notify(self.connection_error, severity="error")
+            return
         wanted = self.client is None
         subprocess.run(
             ["defaults", "write", APP_DEFAULTS, "daemonWanted", "-bool", "YES" if wanted else "NO"], check=False
         )
         if wanted:
             subprocess.Popen(
-                [sys.executable, "-m", "wav2sum", "serve"],
+                [sys.executable, "-m", "wav2sum", "serve", *(["--cloud"] if self.cfg.cloud else [])],
                 start_new_session=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,

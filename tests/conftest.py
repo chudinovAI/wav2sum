@@ -3,7 +3,22 @@ from pathlib import Path
 
 import pytest
 
-from wav2sum import client
+from wav2sum import client, credentials
+
+
+@pytest.fixture(autouse=True)
+def no_user_keychain(monkeypatch):
+    class EmptyKeychain:
+        def __init__(self, **kwargs):
+            pass
+
+        def get(self, name):
+            return None
+
+        def set(self, name, value):
+            pytest.fail("A test must explicitly isolate Keychain before writing")
+
+    monkeypatch.setattr(credentials, "Keychain", EmptyKeychain)
 
 
 @pytest.fixture

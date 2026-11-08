@@ -1,7 +1,7 @@
-"""Numbers and names in a fresh summary of real calls that the transcript doesn't have. Only reads the calls.
+"""Numbers and names in a fresh cloud summary absent from the source transcript. Never writes call results.
 
-Run it after a change to the summary prompt or model:
-    uv run python -m wav2sum.factcheck [call folder ...]
+Explicitly authorize sending the selected transcripts to OpenAI:
+    uv run python -m wav2sum.factcheck --cloud [call folder ...]
 """
 
 import argparse
@@ -10,8 +10,9 @@ import re
 from collections.abc import Sequence
 from pathlib import Path
 
-from wav2sum.llm import LLM
-from wav2sum.summarizer import summarize
+from wav2sum.cloud import OpenAILLM
+from wav2sum.context import recognition_terms
+from wav2sum.summarizer import CITATION, summarize
 
 CALLS = 3
 # Thousands may be split by a space or a comma: 50 000, 50,000.
@@ -22,6 +23,7 @@ SENTENCE_END = ".!?:;—–-*•"
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="python -m wav2sum.factcheck", description=__doc__.splitlines()[0])
+    parser.add_argument("--cloud", action="store_true", required=True, help="send transcripts to OpenAI for summary")
     parser.add_argument("calls", type=Path, nargs="*", help=f"call folders; the last {CALLS} calls by default")
     args = parser.parse_args(argv)
 
@@ -29,18 +31,23 @@ def main(argv: list[str] | None = None) -> None:
     from wav2sum.vocabulary import Vocabulary
 
     cfg = load_config()
-    calls = args.calls or [p.parent for p in sorted(cfg.output_dir.glob("call-*/transcript.txt"))[-CALLS:]]
-    # The same model, context and terms as the summary of a call in calls.py.
-    terms = list(dict.fromkeys([*cfg.dictation.dictionary, *Vocabulary(VOCABULARY_PATH).words]))
-    print(report(calls, LLM(cfg.model, num_ctx=cfg.num_ctx, think=True), terms))
+    llm = OpenAILLM(cfg.summary_model, num_ctx=cfg.num_ctx)
+    try:
+        llm.validate_credentials()
+        calls = args.calls or [p.parent for p in sorted(cfg.output_dir.glob("call-*/transcript.txt"))[-CALLS:]]
+        # The same model, context and terms as the summary of a call in calls.py.
+        terms = recognition_terms(cfg.dictation.dictionary, Vocabulary(VOCABULARY_PATH).words)
+        print(report(calls, llm, terms))
+    finally:
+        llm.unload()
 
 
-def report(calls: list[Path], llm: LLM, terms: Sequence[str]) -> str:
+def report(calls: list[Path], llm: OpenAILLM, terms: Sequence[str]) -> str:
     parts = []
     for call in calls:
         transcript = (call / "transcript.txt").read_text(encoding="utf-8")
         language = json.loads((call / "meta.json").read_text(encoding="utf-8"))["language"]
-        summary = summarize(_untimed(transcript), llm, terms, language)
+        summary = summarize(transcript, llm, terms, language)
         missing = "\n\n".join(
             f"{line}\n  not in the transcript: {', '.join(facts)}" for line, facts in unsupported(summary, transcript)
         )
@@ -57,7 +64,8 @@ def unsupported(summary: str, transcript: str) -> list[tuple[str, list[str]]]:
     words = {_word(w) for w in WORD.findall(transcript)}
     lines = []
     for line in summary.splitlines():
-        text = re.sub(r"\*\*[^*]+\*\*", lambda m: " " * len(m[0]), line)
+        text = CITATION.sub(lambda m: " " * len(m[0]), line)
+        text = re.sub(r"\*\*[^*]+\*\*", lambda m: " " * len(m[0]), text)
         facts = [(m.start(), m[0]) for m in NUMBER.finditer(text) if _number(m[0]) not in numbers]
         for m in WORD.finditer(text):
             name = re.sub(r"['’]s$", "", m[0])

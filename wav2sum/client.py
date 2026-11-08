@@ -13,27 +13,35 @@ class DaemonError(RuntimeError):
     pass
 
 
+class DaemonUnavailable(DaemonError):
+    """No daemon accepted the connection; no request has been sent."""
+
+
 class DaemonClient:
-    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, *, cloud: bool = False):
         self._reader, self._writer = reader, writer
+        self.cloud = cloud
         self._ids = itertools.count(1)
         self._pending: dict[int, asyncio.Future] = {}
         self._events: asyncio.Queue[dict | None] = asyncio.Queue()
         self._reading = asyncio.create_task(self._read())
 
     @classmethod
-    async def connect(cls) -> "DaemonClient":
+    async def connect(cls, *, cloud: bool = False) -> "DaemonClient":
         try:
             reader, writer = await asyncio.open_unix_connection(str(SOCKET_PATH), limit=MAX_MESSAGE)
         except (FileNotFoundError, ConnectionRefusedError):
-            raise DaemonError("the background process is not running (wav2sum serve or the menu bar app)") from None
-        return cls(reader, writer)
+            raise DaemonUnavailable(
+                "the background process is not running (wav2sum serve or the menu bar app)"
+            ) from None
+        return cls(reader, writer, cloud=cloud)
 
     async def request(self, cmd: str, **params) -> dict:
         request_id = next(self._ids)
         future = asyncio.get_running_loop().create_future()
         self._pending[request_id] = future
-        self._writer.write((json.dumps({"id": request_id, "cmd": cmd, **params}, ensure_ascii=False) + "\n").encode())
+        payload = {"id": request_id, "cmd": cmd, **params, "cloud": self.cloud}
+        self._writer.write((json.dumps(payload, ensure_ascii=False) + "\n").encode())
         await self._writer.drain()
         reply = await future
         reply.pop("id", None)

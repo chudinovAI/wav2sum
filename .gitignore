@@ -13,3 +13,5 @@ output/
 .coverage
 .env
 .env.*
+_beta_cloud_keys.json
+Wav2Sum-Private-Beta.dmg

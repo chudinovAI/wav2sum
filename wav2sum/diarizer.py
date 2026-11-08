@@ -9,6 +9,10 @@ import torch
 from huggingface_hub import get_token
 
 from wav2sum.audio import SAMPLE_RATE
+from wav2sum.local_models import DIARIZATION_FILES, DIARIZATION_REVISION, snapshot_path
+
+# pyannote enables usage telemetry by default; local calls never send telemetry.
+os.environ["PYANNOTE_METRICS_ENABLED"] = "false"
 
 with warnings.catch_warnings():
     warnings.filterwarnings("ignore", message=r"(?s).*torchcodec.*")
@@ -28,15 +32,16 @@ class Turn:
 
 class Diarizer:
     def __init__(self, device: str, lock: "threading.Lock | None" = None):
-        token = os.environ.get("HF_TOKEN") or get_token()
-        if not token:
+        prepared = snapshot_path(MODEL_ID, DIARIZATION_REVISION, DIARIZATION_FILES)
+        token = None if prepared else os.environ.get("HF_TOKEN") or get_token()
+        if not prepared and not token:
             raise OSError(
-                "A Hugging Face token is needed for pyannote (mono recordings and group calls): "
-                "set HF_TOKEN or run `hf auth login`."
+                "For mono or group calls, accept the pyannote terms on Hugging Face and prepare "
+                "the model with a token, or set HF_TOKEN for an existing installation."
             )
         self.lock = lock or threading.Lock()
         logger.info("Loading pyannote on %s …", device)
-        self.pipeline = Pipeline.from_pretrained(MODEL_ID, token=token)
+        self.pipeline = Pipeline.from_pretrained(prepared or MODEL_ID, token=token)
         # The default Fb 0.8 makes a second person of short "okay"/"mm" in a 1-on-1 call (CHU-132).
         self.pipeline.instantiate({"clustering": {"Fb": 2.0}})
         self.pipeline.to(torch.device(device))

@@ -3,6 +3,7 @@ import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
+from wav2sum.cloud import OpenAILLM
 from wav2sum.language import EN, RU
 from wav2sum.llm import LLM
 
@@ -42,6 +43,29 @@ SUMMARY_PROMPT_RU = f"""\
 ради заполнения.
 - Кто говорит, видно из разметки. Отдельно участников не перечисляй.
 - Лучше коротко и точно, чем подробно и с домыслами.\
+"""
+
+GROUNDING_RU = """\
+Каждый фактический пункт, включая тему, должен содержать точную ссылку на исходную реплику в формате \
+[U1 00:01–00:04], скопированную из входа. Вход может быть транскриптом или ранее составленными заметками; \
+сжимай заметки, сохраняя ссылки на исходные реплики. Используй только ссылки из этого фрагмента или заметок. \
+Только отдельные стандартные заголовки «Тема», «Обсуждения», «Решения», «Задачи», «Открытые вопросы» \
+не требуют ссылки; заголовок раздела со своим названием должен содержать ссылку. Ссылки должны быть видимым \
+обычным текстом, а не скрыты в комментариях или адресах ссылок. Не придумывай ссылки. \
+Различай предложение и принятое решение: \
+предложение само по себе не задача. Не приписывай исполнителя или срок, если это не сказано в указанных репликах. \
+Учитывай явные исправления говорящего и не представляй исправлённое утверждение как окончательное.\
+"""
+
+GROUNDING_EN = """\
+Every factual point, including the topic, must include an exact source utterance reference in the format \
+[U1 00:01–00:04], copied from the input. The input can be transcript or earlier notes; condense notes while \
+preserving references to original utterances. Use only references in this fragment or these notes. \
+Only standalone standard section headings (Topic, Discussion, Decisions, Action items, Open questions) need no \
+reference; a custom meeting section heading must have one. References must be visible plain text, not hidden in \
+comments or link destinations. Do not invent references. Distinguish proposals from decisions: \
+a proposal alone is not an action item. Do not assign an owner or deadline unless stated in the cited utterances. \
+Respect explicit speaker corrections; do not present a corrected earlier statement as the final claim.\
 """
 
 CHUNK_PROMPT_RU = f"""\
@@ -175,22 +199,224 @@ PROMPTS = {
 }
 
 
-def summarize(transcript: str, llm: LLM, terms: Sequence[str] = (), language: str = RU) -> str:
+SOURCE_LINE = re.compile(r"^\[(\d+:\d\d(?::\d\d)?) – (\d+:\d\d(?::\d\d)?)\] (.+)$", re.DOTALL)
+CITATION = re.compile(r"\[U[1-9]\d* \d+:\d\d(?::\d\d)?–\d+:\d\d(?::\d\d)?\]")
+STANDARD_HEADINGS = {
+    "Тема",
+    "Обсуждения",
+    "Решения",
+    "Задачи",
+    "Открытые вопросы",
+    "Topic",
+    "Discussion",
+    "Decisions",
+    "Action items",
+    "Open questions",
+}
+
+
+def _visible_text(text: str) -> str:
+    # Remove comments across lines without joining the surrounding lines.
+    text = re.sub(
+        r"<!--.*?(?:-->|$)",
+        lambda match: re.sub(r"[^\n]", " ", match.group()),
+        text,
+        flags=re.DOTALL,
+    )
+    # Markdown link destinations can contain balanced parentheses and escaped characters.
+    chars = list(text)
+    index = 0
+    while index < len(text) - 1:
+        if text[index : index + 2] != "](":
+            index += 1
+            continue
+        end, depth = index + 2, 1
+        while end < len(text) and depth:
+            if text[end] == "\\" and end + 1 < len(text):
+                end += 2
+                continue
+            if text[end] == "(":
+                depth += 1
+            elif text[end] == ")":
+                depth -= 1
+            end += 1
+        if not depth:
+            for pos in range(index + 1, end):
+                if chars[pos] != "\n":
+                    chars[pos] = " "
+            index = end
+        else:
+            index += 1
+    return re.sub(r"<[^>]*>", "", "".join(chars))
+
+
+def _source_utterances(transcript: str) -> list[str]:
+    utterances = []
+    for index, utterance in enumerate(transcript.split("\n\n"), 1):
+        match = SOURCE_LINE.fullmatch(utterance)
+        if not match or not re.match(r"[^:\n]+: \S", match[3]):
+            raise ValueError("Summary requires a timestamped, speaker-labelled transcript")
+        start, end = match[1], match[2]
+        for clock in (start, end):
+            parts = [int(part) for part in clock.split(":")]
+            if parts[-1] >= 60 or (len(parts) == 3 and parts[-2] >= 60):
+                raise ValueError("Invalid utterance timestamp")
+        if _seconds(start) > _seconds(end):
+            raise ValueError("Utterance ends before it starts")
+        utterances.append(f"[U{index} {start}–{end}] {match[3]}")
+    return utterances
+
+
+def _validated_reply(reply: str, available: set[str]) -> str:
+    if not reply.strip():
+        raise ValueError("Grounded summary is empty")
+    # Validate every marker, including hidden ones, before deciding what is visible.
+    all_refs = CITATION.findall(reply)
+    if re.search(r"\[U", CITATION.sub("", reply), re.IGNORECASE):
+        raise ValueError("Malformed source reference")
+    if any(ref not in available for ref in all_refs):
+        raise ValueError("Unknown or out-of-chunk source reference")
+    cited = False
+    for line in _visible_text(reply).splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        refs = CITATION.findall(line)
+        without_refs = CITATION.sub("", line)
+        heading = re.fullmatch(r"(?:#{1,6}\s*)?\*\*([^*]+)\*\*\s*[:—–-]?", stripped)
+        if heading and heading[1] in STANDARD_HEADINGS:
+            continue
+        if not refs or not re.sub(r"[\s\-–—*#•:]+", "", without_refs):
+            raise ValueError("Factual summary line lacks a source reference")
+        cited = True
+    if not cited:
+        raise ValueError("Grounded summary contains no cited facts")
+    return reply.strip()
+
+
+def _split_source(
+    item: tuple[str, set[str]],
+    llm: LLM | OpenAILLM,
+    *,
+    system: str,
+    label: str,
+    budget: int,
+    max_tokens: int,
+) -> list[tuple[str, set[str]]]:
+    text, refs = item
+    if llm.count_tokens(system) + llm.count_tokens(f"{label}:\n\n{text}") <= budget:
+        return [item]
+    # Every fragment retains the actual whole-utterance reference, not invented word timings.
+    match = re.match(r"(\[U[^\]]+\] [^:\n]+: )(.*)", text, re.DOTALL)
+    assert match is not None
+    prefix, remaining = match.groups()
+
+    def within_budget(value: str, limit: int) -> bool:
+        return llm.count_tokens(system) + llm.count_tokens(f"{label}:\n\n{prefix}{value}") <= limit
+
+    fragments = []
+    while remaining:
+        limit = budget if within_budget(remaining[:1], budget) else max_tokens
+        low = next(
+            (length for length in range(1, len(remaining) + 1) if within_budget(remaining[:length], limit)), None
+        )
+        if low is None:
+            raise ValueError("Model context is too small for a source fragment")
+        high = len(remaining)
+        while low < high:
+            middle = (low + high + 1) // 2
+            if within_budget(remaining[:middle], limit):
+                low = middle
+            else:
+                high = middle - 1
+        end = low
+        if end < len(remaining):
+            boundary = end
+            while boundary and not remaining[boundary - 1].isspace():
+                boundary -= 1
+            if boundary and within_budget(remaining[:boundary], limit):
+                end = boundary
+        fragments.append((prefix + remaining[:end], refs))
+        remaining = remaining[end:]
+    return fragments
+
+
+def summarize(transcript: str, llm: LLM | OpenAILLM, terms: Sequence[str] = (), language: str = RU) -> str:
+    if not transcript.strip():
+        return ""
     prompts = PROMPTS[language]
     glossary = "\n\n" + prompts.glossary.format(", ".join(terms)) if terms else ""
+    grounding = GROUNDING_RU if language == RU else GROUNDING_EN
+    summary_system = prompts.summary + "\n\n" + grounding + glossary
+    chunk_system = prompts.chunk + "\n\n" + grounding + glossary
     max_tokens = llm.num_ctx - RESERVED_TOKENS
-    user = f"{prompts.transcript}:\n\n{transcript}"
-    if llm.count_tokens(prompts.summary + glossary + user) <= max_tokens:
-        return llm.chat(prompts.summary + glossary, user)
+    source = [(utterance, {utterance.split("]", 1)[0] + "]"}) for utterance in _source_utterances(transcript)]
 
-    chunks = chunk_transcript(transcript, max_tokens * 2 // 3, llm.count_tokens)
-    logger.info("Long transcript (%d chars): summarizing %d parts first.", len(transcript), len(chunks))
-    notes = [llm.chat(prompts.chunk + glossary, chunk) for chunk in chunks]
-    joined = "\n\n".join(f"--- {prompts.part} {i} ---\n{n}" for i, n in enumerate(notes, 1))
-    return llm.chat(prompts.summary + glossary, f"{prompts.notes}:\n\n{joined}")
+    def user_text(items: list[tuple[str, set[str]]], label: str) -> str:
+        return f"{label}:\n\n" + "\n\n".join(text for text, _ in items)
+
+    def references(items: list[tuple[str, set[str]]]) -> set[str]:
+        return set().union(*(refs for _, refs in items))
+
+    def fits(system: str, user: str) -> bool:
+        return llm.count_tokens(system) + llm.count_tokens(user) <= max_tokens
+
+    def generate(system: str, user: str, available: set[str]) -> tuple[str, set[str]]:
+        if not fits(system, user):
+            raise ValueError("Grounded summary input exceeds the model context")
+        # Both implementations add 64 to the growth limit; leave another 64 for chat framing.
+        growth = (RESERVED_TOKENS - 128) / max(1, llm.count_tokens(user))
+        reply = _validated_reply(llm.chat(system, user, max_growth=growth), available)
+        return reply, set(CITATION.findall(_visible_text(reply)))
+
+    source_user = user_text(source, prompts.transcript)
+    if fits(summary_system, source_user):
+        return generate(summary_system, source_user, references(source))[0]
+
+    # Account for the actual system prompt, glossary, labels, and separators on every pass.
+    overhead = max(llm.count_tokens(summary_system), llm.count_tokens(chunk_system))
+    group_budget = max_tokens - max(1, (max_tokens - overhead) // 3)
+    if group_budget <= overhead:
+        raise ValueError("Model context is too small for grounded summary prompts")
+
+    source = [
+        fragment
+        for item in source
+        for fragment in _split_source(
+            item, llm, system=chunk_system, label=prompts.transcript, budget=group_budget, max_tokens=max_tokens
+        )
+    ]
+
+    def groups(items: list[tuple[str, set[str]]], label: str) -> list[list[tuple[str, set[str]]]]:
+        batches: list[list[tuple[str, set[str]]]] = []
+        current: list[tuple[str, set[str]]] = []
+        for item in items:
+            candidate = user_text([*current, item], label)
+            if current and llm.count_tokens(chunk_system) + llm.count_tokens(candidate) > group_budget:
+                batches.append(current)
+                current = []
+            current.append(item)
+            if not fits(chunk_system, user_text(current, label)):
+                raise ValueError("A source utterance or grounded note exceeds the model context")
+        if current:
+            batches.append(current)
+        return batches
+
+    batches = groups(source, prompts.transcript)
+    logger.info("Long transcript (%d chars): summarizing %d parts first.", len(transcript), len(batches))
+    notes = [generate(chunk_system, user_text(batch, prompts.transcript), references(batch)) for batch in batches]
+    while True:
+        notes_user = user_text(notes, prompts.notes)
+        if fits(summary_system, notes_user):
+            return generate(summary_system, notes_user, references(notes))[0]
+        batches = groups(notes, prompts.notes)
+        reduced = [generate(chunk_system, user_text(batch, prompts.notes), references(batch)) for batch in batches]
+        if llm.count_tokens(user_text(reduced, prompts.notes)) >= llm.count_tokens(notes_user):
+            raise ValueError("Grounded notes could not be reduced to fit the model context")
+        notes = reduced
 
 
-def chapters(transcript: str, llm: LLM, language: str = RU) -> str:
+def chapters(transcript: str, llm: LLM | OpenAILLM, language: str = RU) -> str:
     """Chapters from a timestamped transcript, in a call of their own without thinking: with the timestamps and
     a chapters section in the summary prompt, the summary's thinking looped on re-checking them."""
     prompts = PROMPTS[language]
@@ -216,7 +442,7 @@ def chapters(transcript: str, llm: LLM, language: str = RU) -> str:
         if len(lines) > MAX_CHAPTERS:
             # The model doesn't keep to the limit, and a long call gets up to that many from each part.
             lines = at_starts(llm.chat(prompts.merge_chapters, "\n".join(lines), max_growth=1, think=False)) or lines
-    except ValueError as e:
+    except (ValueError, RuntimeError) as e:
         logger.warning("No chapters: %s", e)
         return ""
     return f"**{prompts.chapters_title}**\n" + "\n".join(lines) if lines else ""

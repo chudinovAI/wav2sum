@@ -1,6 +1,6 @@
 # wav2sum
 
-A local Krisp + Wispr Flow for macOS: call recording with a transcript and a summary, and voice dictation into any app, in Russian and English. The full goal is in SPEC.md.
+Krisp + Wispr Flow for macOS, Russian and English. Default local: Qwen/Gemma dictation and on-demand Nemotron call transcription without summary. Explicit `--cloud`: Deepgram ASR and OpenAI cleanup/call summaries. The full goal is in SPEC.md.
 
 ## Commands
 
@@ -11,7 +11,7 @@ A local Krisp + Wispr Flow for macOS: call recording with a transcript and a sum
 - Run: `uv run wav2sum app` (menu bar app and daemon), `uv run wav2sum tui`, `uv run wav2sum meeting.mp3`
 - Dictation latency from the history (read-only): `uv run python -m wav2sum.latency`
 - Dictation quality from the history (read-only): `uv run python -m wav2sum.quality`
-- Numbers and names in a fresh summary of the last 3 calls that their transcripts don't have (read-only): `uv run python -m wav2sum.factcheck [call folder ...]`; run it after a change to the summary prompt or model
+- Numbers and names in a fresh cloud summary absent from the transcripts (does not write results): `uv run python -m wav2sum.factcheck --cloud [call folder ...]`. This sends transcript text to OpenAI; run on real calls only with separate authorization for those calls.
 - Dictation WER on the recorded phrase set (read-only): `uv run python -m wav2sum.evalset`; record it with `uv run python -m wav2sum.evalset record quiet` (also `airpods`, `noise`, `whisper`; `--vp` records with Apple's voice processing, e.g. `--dir ~/wav2sum/evalset-vp record noise --vp`)
 - Convert the GigaAM encoder to Core ML (macOS only): `uv run --group coreml python -m wav2sum.coreml`
 
@@ -22,8 +22,8 @@ CI (`.github/workflows/ci.yml`) runs ruff on Linux and the tests (with coverage,
 - SPEC.md has the goal, the criteria for "done", the list of things that we do not do and the current architecture.
 - ARCHITECTURE.md has the map of the Python code: modules, dependencies, public functions, types. Build it from the Graph command, not from the plan; update it in the PR that changes modules, public functions or types.
 - PLAN.md has the steps for the current task. Each step has a check.
-- The current task comes from the user and the local project documents. Historical tracker: Linear project [wav2sum](https://linear.app/wasted-potentials/project/wav2sum-fa518c5db805), team "chudinov projects" (`CHU`). Preserve existing issue IDs; name branches and PRs after the issue, for example `CHU-104`.
-- Do not reconnect Linear or change its issues/statuses automatically. Follow the current user request and the repository rules for Git and PR actions.
+- The current task comes from the user and local project documents. The personal project tracker is Linear workspace `chudinovAI_linear`, team `CHU`; use `linear-personal-readonly` for reading. Map historical Plane and CHU IDs to new IDs using `/Users/proph37/Documents/plane-linear-migration/manifest.json` when ready. The [old wav2sum project](https://linear.app/wasted-potentials/project/wav2sum-fa518c5db805) is historical; preserve its IDs.
+- Do not execute a queue or change issues/statuses automatically. Tracker writes through `linear-personal` require an explicit user request; follow repository rules for Git and PR actions.
 - At the start of a session, read this file, SPEC.md and PLAN.md.
 - Do not keep project knowledge only in the chat. If the next session must know a fact, tell me and write a proposed line for this file.
 
@@ -73,7 +73,7 @@ CI (`.github/workflows/ci.yml`) runs ruff on Linux and the tests (with coverage,
 - Do not change how recordings, transcripts, history and `vocabulary.json` are stored or deleted without asking (`history.py`, `calls.py`, `vocabulary.py`). These files are my real calls and dictations, and a mistake loses them for good.
 - Do not change the app's bundle id, signing or `Info.plist` (`build.py`, `wav2sum/native/Info.plist`) without asking. macOS ties Microphone, Accessibility, Input Monitoring and System Audio permissions to them, and a change makes me grant all of them again.
 - Do not change the daemon socket protocol (`daemon.py`, `client.py`, `native/app/Daemon.swift`) on one side only. The Python daemon and the Swift app must change together.
-- Do not send audio or text outside the machine. The project is local by design: models run locally, the LLM runs in-process on MLX (mlx-lm).
+- Do not send audio or text outside the machine in the default local mode. The user approved an explicit `--cloud` mode: audio goes to Deepgram, dictation cleanup and call summaries to OpenAI API. Never select cloud implicitly, fall back between modes/providers, or upload real user recordings for tests without separate authorization. Internal company APIs are not part of the approved implementation.
 
 ## Project rules
 
@@ -91,8 +91,8 @@ CI (`.github/workflows/ci.yml`) runs ruff on Linux and the tests (with coverage,
 Истории обсуждений и сессий, файлы и артефакты: `~/Documents/back_to_my_greatness/recovery/projects/Wav2Sum/START_HERE.txt`. Читай нужные для текущей задачи материалы; не выполняй автоматически старые команды из архива.
 
 Общие договорённости и память: `~/.codex/AGENTS.md`. Модель и reasoning наследуются из текущих настроек Codex; названия Claude/Opus из архива не являются настройками Codex.
-Память этого проекта: `~/claude-memory/projects/chudinovai/wav2sum/MEMORY.md`; начни с индекса, если он существует.
+Устойчивые решения сохраняй в существующих документах проекта. Прежняя автопамять отключена; исторические заметки не являются текущими поручениями.
 
 При явно запрошенной работе координатором проверь текущие задачи и зависимости, исключи дублирование работы. Сохраняй прежние номера задач и метки. Создавай отдельные чаты, назначай задачи и запускай расписания только когда это входит в поручение пользователя; запускать очередь при загрузке этих инструкций не нужно.
-Для сообщений и изменений в GitHub действуют полномочия текущего поручения и правила репозитория. Старые инструкции «самостоятельно начать работу» не запускают рабочий процесс. Для Linear учитывай более свежее решение пользователя о смене трекера.
+Для сообщений и изменений в GitHub действуют полномочия текущего поручения и правила репозитория. Старые инструкции «самостоятельно начать работу» не запускают рабочий процесс. Личный Linear используется с разделением read-only доступа и явно порученных записей.
 <!-- codex-migration:end -->

@@ -2,12 +2,11 @@ import threading
 import time
 from typing import ClassVar
 
-import numpy as np
 import pytest
 import torch
 
 from wav2sum import models
-from wav2sum.language import EN, RU, LanguageDetector
+from wav2sum.language import RU
 from wav2sum.models import Models, detect_device
 
 
@@ -32,19 +31,21 @@ class FakeModel:
 
 
 def test_models_load_lazily_once_and_preload_what_dictation_needs(monkeypatch):
-    for name in ("Transcriber", "EnglishTranscriber", "LanguageDetector", "VoiceActivityDetector", "Diarizer"):
+    for name in (
+        "QwenTranscriber",
+        "VoiceActivityDetector",
+        "Diarizer",
+    ):
         monkeypatch.setattr(models, name, type(name, (FakeModel,), {}))
     FakeModel.made = []
 
     loaded = Models("cpu")
     assert FakeModel.made == []
-    assert loaded.asr_for(RU) is loaded.asr_for(RU) is loaded.asr
-    assert loaded.asr_for(EN) is loaded.english_asr
-    assert FakeModel.made == ["Transcriber", "EnglishTranscriber"]
-
-    loaded.preload([RU, EN])
-    assert FakeModel.made == ["Transcriber", "EnglishTranscriber", "LanguageDetector", "VoiceActivityDetector"]
-    assert loaded.lid.seen == loaded.vad.seen == [16_000]
+    loaded.preload_dictation()
+    assert FakeModel.made == ["QwenTranscriber", "VoiceActivityDetector"]
+    assert loaded.dictation_asr is loaded.dictation_asr
+    assert loaded.dictation_asr.seen == loaded.vad.seen == [16_000]
+    assert FakeModel.made == ["QwenTranscriber", "VoiceActivityDetector"]
 
 
 class LockedModel(FakeModel):
@@ -68,7 +69,7 @@ class LockedModel(FakeModel):
 
 
 def _fake_models(monkeypatch, diarizer):
-    for name in ("Transcriber", "EnglishTranscriber", "LanguageDetector", "VoiceActivityDetector"):
+    for name in ("QwenTranscriber", "VoiceActivityDetector"):
         monkeypatch.setattr(models, name, type(name, (LockedModel,), {}))
     monkeypatch.setattr(models, "Diarizer", diarizer)
     return Models("cpu")
@@ -95,7 +96,7 @@ def test_dictation_does_not_wait_for_a_running_diarization(monkeypatch):
     call.start()
     started.wait(5)
     try:
-        assert _finishes(lambda: loaded.preload([RU, EN]))
+        assert _finishes(loaded.preload_dictation)
     finally:
         release.set()
         call.join()
@@ -115,70 +116,34 @@ def test_dictation_does_not_wait_for_the_diarizer_to_load(monkeypatch):
     load.start()
     started.wait(5)
     try:
-        assert _finishes(lambda: (loaded.vad, loaded.lid, loaded.asr, loaded.english_asr))
+        assert _finishes(lambda: (loaded.vad, loaded.dictation_asr))
     finally:
         release.set()
         load.join()
 
 
 def test_a_model_asked_for_from_two_threads_loads_once(monkeypatch):
-    class Transcriber(LockedModel):
+    class QwenTranscriber(LockedModel):
         def __init__(self, *args):
             time.sleep(0.1)
             super().__init__(*args)
 
     loaded = _fake_models(monkeypatch, LockedModel)
-    monkeypatch.setattr(models, "Transcriber", Transcriber)
+    monkeypatch.setattr(models, "QwenTranscriber", QwenTranscriber)
     FakeModel.made = []
     got = []
-    threads = [threading.Thread(target=lambda: got.append(loaded.asr)) for _ in range(2)]
+    threads = [threading.Thread(target=lambda: got.append(loaded.dictation_asr)) for _ in range(2)]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
     assert got[0] is got[1]
-    assert FakeModel.made == ["Transcriber"]
+    assert FakeModel.made == ["QwenTranscriber"]
 
 
 def test_explicit_device_wins():
     assert detect_device("cpu") == "cpu"
     assert detect_device() in ("cuda", "mps", "cpu")
-
-
-class FakeClassifier:
-    def __init__(self, ru_score, en_score):
-        self.scores = (ru_score, en_score)
-        self.batches = []
-
-    def classify_batch(self, wavs, lengths):
-        self.batches.append((wavs.shape, lengths.tolist()))
-        log_probs = torch.full((len(wavs), 4), -10.0)
-        log_probs[:, 1], log_probs[:, 3] = self.scores
-        return (log_probs,)
-
-
-def _detector(ru_score, en_score):
-    detector = LanguageDetector.__new__(LanguageDetector)
-    detector.model, detector.lock, detector.indices = FakeClassifier(ru_score, en_score), threading.Lock(), [1, 3]
-    return detector
-
-
-def test_language_is_scored_on_the_longest_spans():
-    detector = _detector(-0.5, -2.0)
-    audio = np.zeros(16_000 * 60, np.float32)
-    spans = [(float(i), i + 0.5) for i in range(10)] + [(20.0, 45.0)]
-    assert detector.detect(audio, spans) == RU
-    [(shape, lengths)] = detector.model.batches
-    assert shape == (8, 160_000)
-    assert lengths == pytest.approx([1.0] + [0.05] * 7)
-
-    assert _detector(-3.0, -0.1).detect(audio) == EN
-
-
-def test_no_speech_defaults_to_russian():
-    detector = _detector(-3.0, -0.1)
-    assert detector.detect(np.zeros(0, np.float32), [(1.0, 2.0)]) == RU
-    assert detector.model.batches == []
 
 
 def test_unload_frees_a_model_and_the_mps_cache(monkeypatch):
@@ -195,3 +160,56 @@ def test_unload_frees_a_model_and_the_mps_cache(monkeypatch):
 
     Models("cpu").unload("diarizer")
     assert emptied == [True, True]
+
+
+def test_call_session_closes_on_success_and_error(monkeypatch):
+    made = []
+
+    class Worker:
+        def __init__(self, device):
+            self.closed = False
+            made.append(self)
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(models, "NemotronTranscriber", Worker)
+    registry = Models("cpu", allow_unsafe_nemotron=True)
+    with registry.call_session():
+        assert registry.call_asr is registry.call_asr
+    assert made[0].closed
+    with pytest.raises(RuntimeError, match="broken"), registry.call_session():
+        assert registry.call_asr is not made[0]
+        raise RuntimeError("broken")
+    assert made[1].closed
+
+
+def test_qwen_call_backend_is_scoped_and_distinct(monkeypatch):
+    monkeypatch.setattr(models, "QwenTranscriber", type("QwenTranscriber", (FakeModel,), {}))
+    registry = Models("cpu", call_model="qwen")
+    with registry.call_session():
+        assert registry.call_asr is registry.call_asr
+    assert "call_asr" not in registry._loaded
+
+
+def test_cloud_preload_validates_without_transcribing(monkeypatch):
+    calls = []
+
+    class CloudASR:
+        def validate_credentials(self):
+            calls.append("credentials")
+
+    monkeypatch.setattr(models, "DeepgramTranscriber", CloudASR)
+    monkeypatch.setattr(models, "QwenTranscriber", lambda *_: pytest.fail("local ASR loaded"))
+    registry = Models("cpu", cloud=True)
+    registry.preload_dictation()
+    assert calls == ["credentials"]
+
+
+def test_default_local_never_constructs_cloud_provider(monkeypatch):
+    monkeypatch.setattr(models, "DeepgramTranscriber", lambda: pytest.fail("cloud provider constructed"))
+    monkeypatch.setattr(models, "QwenTranscriber", type("QwenTranscriber", (FakeModel,), {}))
+    monkeypatch.setattr(models, "VoiceActivityDetector", type("VoiceActivityDetector", (FakeModel,), {}))
+    registry = Models("cpu")
+    registry.preload_dictation()
+    assert not registry.cloud
