@@ -1,5 +1,15 @@
 # Текущий план
 
+## Отказ bootstrap при разборе signing identity
+
+- [x] Воспроизвести реальный формат macOS, исправить парсер без смены сертификата и проверить read-only prerequisites.
+
+После пользовательского запуска найден баг `_named_identity`: статус `(CSSMERR_TP_NOT_TRUSTED)` после имени исключал реально существующий configured certificate, а один SHA в секциях Matching/Valid ошибочно считался двумя identities. Регрессии с обоими форматами сначала падали; парсер теперь принимает status suffix и считает уникальные SHA только для точного configured name. Подпись установленного dev-app проходит codesign strict; её leaf совпадает с выбранным существующим сертификатом, реальные layout/serve/Python environment также прошли read-only bootstrap preflight. Trust store, сертификаты, signing method, Info.plist, конфиг и установленный app не менялись; bootstrap/sign/build/launch не запускались.
+
+По отдельному подтверждению пользователя неверный ambiguity fixture (тот же SHA дважды) заменён на два разных SHA; assertions отказа при missing/distinct ambiguous/mismatched/ad-hoc identities сохранены. 139 связанных build/platform/runtime tests прошли; scoped Ruff check/format и diff --check прошли. Независимое ревью парсера: существенных замечаний нет, 21 focused тест и 6 синтетических probes прошли. Предупреждение legacy config `model` — отдельное и не менялось. При повторе bootstrap/watch использовать fish `and`, чтобы watcher не запускался после failed bootstrap.
+
+Пользователь после повторного запуска и инструкции включить Background Process/дать Microphone access подтвердил: «да все работает». Это ручное пользовательское подтверждение работы приложения/диктовки, не выполненный агентом live smoke и не отдельная проверка автоматического handoff при следующем изменении Swift. Затем явной командой «запушь» разрешил commit/push этого исправления в main. Перед публикацией повторены 139 связанных тестов, полный Ruff check/format (97 файлов) и diff --check; всё прошло. В commit входят только build.py, два файла тестов и эта запись; research/watchdog исключены. SHA удалённой ветки и CI проверяются после отправки.
+
 ## Финальная проверка проекта и push
 
 Согласовано 9 ноября 2026: проверить весь текущий код на ошибки, дублирование и лишнюю сложность, затем отправить весь проверенный код/тесты/документацию и два прежних локальных коммита в `origin/main`. `research/` и `WATCHDOG.yml` оставить локально. Это явное разрешение на commit/push для данного шага; deploy и изменения пользовательских данных не разрешены.

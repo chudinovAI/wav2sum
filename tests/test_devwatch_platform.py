@@ -318,7 +318,7 @@ def test_missing_or_linked_sources_rejected(tmp_path, relative, change):
 
 
 @pytest.mark.parametrize(
-    "identities", ["", f'  1) {IDENTITY} "wav2sum"\n  2) {IDENTITY} "wav2sum"\n', f'  1) {"B" * 40} "wav2sum"\n']
+    "identities", ["", f'  1) {IDENTITY} "wav2sum"\n  2) {"B" * 40} "wav2sum"\n', f'  1) {"B" * 40} "wav2sum"\n']
 )
 def test_identity_missing_ambiguous_or_mismatch(tmp_path, tools, identities):
     app = make_bundle(tmp_path / "App.app")

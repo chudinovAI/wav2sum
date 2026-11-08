@@ -296,6 +296,24 @@ def test_bootstrap_refuses_missing_or_ambiguous_identity(bootstrap, monkeypatch,
     assert (bootstrap / "Contents/MacOS/Wav2Sum").read_text() == "original"
 
 
+@pytest.mark.parametrize("annotated", [False, True])
+def test_bootstrap_accepts_macos_identity_sections_and_status(bootstrap, monkeypatch, annotated):
+    identity, other = "A" * 40, "B" * 40
+    suffix = " (CSSMERR_TP_NOT_TRUSTED)" if annotated else ""
+    valid = "" if annotated else f'  1) {identity} "synthetic name"\n'
+    listing = (
+        "Policy: Code Signing\n  Matching identities\n"
+        f'  1) {identity} "synthetic name"{suffix}\n'
+        f'  2) {other} "Other developer"\n     2 identities found\n'
+        "\n  Valid identities only\n"
+        f'{valid}  2) {other} "Other developer"\n'
+    )
+    monkeypatch.setattr(build, "_run", lambda cmd: listing)
+    assert build._named_identity() == identity
+    assert build.bootstrap_watch_app() == bootstrap
+    assert (bootstrap / "Contents/Resources/Wav2SumSourceDigest").is_file()
+
+
 def test_bootstrap_refuses_adhoc_identity(bootstrap, monkeypatch):
     monkeypatch.setattr(build, "SIGNING_IDENTITY", "-")
     with pytest.raises(build.BuildError):

@@ -318,11 +318,11 @@ def _named_identity() -> str:
     if not SIGNING_IDENTITY or SIGNING_IDENTITY == "-":
         raise BuildError("A unique named signing identity is required for dev-watch.")
     found = _run(["security", "find-identity", "-p", "codesigning"])
-    matches = re.findall(r'^\s*\d+\)\s+([0-9A-Fa-f]{40})\s+"([^"\n]+)"\s*$', found, re.M)
-    selected = [sha.upper() for sha, name in matches if name == SIGNING_IDENTITY]
+    matches = re.findall(r'^\s*\d+\)\s+([0-9A-Fa-f]{40})\s+"([^"\n]+)"(?:[ \t]+\([^()\n]*\))?[ \t]*$', found, re.M)
+    selected = {sha.upper() for sha, name in matches if name == SIGNING_IDENTITY}
     if len(selected) != 1:
         raise BuildError("Signing identity is missing or ambiguous.")
-    return selected[0]
+    return next(iter(selected))
 
 
 def _signature(path: Path) -> tuple[str, str]:
