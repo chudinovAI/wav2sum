@@ -311,6 +311,62 @@ def test_remote_side_is_diarized_when_more_than_two_people(tmp_path, monkeypatch
     assert [u.speaker for u in result.utterances] == ["Я", "Они 2"]
 
 
+def test_one_person_found_in_a_range_keeps_the_plain_name(tmp_path, monkeypatch):
+    audio = _call(tmp_path, monkeypatch)
+    models = fake_models(turns=[Turn(0, 3.0, 5.0)])
+
+    result = process(
+        audio, models, tmp_path / "output", llm=None, speakers=Speakers(None, 2, 7), names=Names("Я", "Илья")
+    )
+
+    assert [u.speaker for u in result.utterances] == ["Я", "Илья"]
+
+
+@pytest.mark.parametrize("speaker_id", [0, 2])
+def test_single_diarized_speaker_respects_names_even_when_using_cache(tmp_path, monkeypatch, speaker_id):
+    audio = _call(tmp_path, monkeypatch)
+    models = fake_models(turns=[Turn(speaker_id, 3.0, 5.0)])
+    speakers = Speakers(None, 2, 7)
+    kwargs = {"llm": None, "speakers": speakers}
+
+    first = process(audio, models, tmp_path / "output", names=Names("Я", "Илья"), **kwargs)
+    calls_before = models.call_asr.calls
+    second = process(audio, models, tmp_path / "output", names=Names("Я", "Илья", {speaker_id: "Алексей"}), **kwargs)
+    third = process(audio, models, tmp_path / "output", names=Names("Я", "Друг"), **kwargs)
+
+    assert [u.speaker for u in first.utterances] == ["Я", "Илья"]
+    assert [u.speaker for u in second.utterances] == ["Я", "Алексей"]
+    assert [u.speaker for u in third.utterances] == ["Я", "Друг"]
+    assert models.call_asr.calls == calls_before
+
+
+def test_multiple_diarized_speakers_in_a_range_remain_numbered(tmp_path, monkeypatch):
+    audio = _call(tmp_path, monkeypatch)
+    models = fake_models(turns=[Turn(0, 3.0, 4.0), Turn(1, 4.0, 5.0)])
+    result = process(audio, models, tmp_path / "output", llm=None, speakers=Speakers(None, 2, 7))
+    assert [u.speaker for u in result.utterances] == ["Я", "Собеседник 1", "Собеседник 2"]
+
+
+def test_single_speaker_cache_from_v8_is_recomputed(tmp_path, monkeypatch):
+    audio = _call(tmp_path, monkeypatch)
+    models = fake_models(turns=[Turn(0, 3.0, 5.0)])
+    output = tmp_path / "output"
+    kwargs = {"llm": None, "speakers": Speakers(None, 2, 7), "names": Names(diarized={0: "Алексей"})}
+    process(audio, models, output, **kwargs)
+    cached = next((output / ".cache").glob("*/utterances.json"))
+    payload = json.loads(cached.read_text())
+    payload["params"]["version"] = 8
+    for utterance in payload["utterances"]:
+        if utterance["speaker"].startswith("single-remote:"):
+            utterance["speaker"] = "them"
+    cached.write_text(json.dumps(payload))
+    before = models.call_asr.calls
+
+    result = process(audio, models, output, **kwargs)
+    assert [u.speaker for u in result.utterances] == ["Я", "Алексей"]
+    assert models.call_asr.calls > before
+
+
 def test_auto_language_comes_from_transcribed_text(tmp_path, monkeypatch):
     audio = _call(tmp_path, monkeypatch, mine_amp=0.7, theirs_amp=0.9)
     models = fake_models()

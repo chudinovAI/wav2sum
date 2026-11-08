@@ -25,14 +25,14 @@ from wav2sum.vocabulary import Vocabulary
 
 logger = logging.getLogger(__name__)
 
-CACHE_VERSION = 8
+CACHE_VERSION = 9
 CALL_WINDOW_SEC = 50.0
 CALL_WINDOW_GAP_SEC = 2.0
 
 CALL = "call"
 MONO = "mono"
 
-ME, THEM, SPEAKER = "me", "them", "spk"
+ME, THEM, SPEAKER, SINGLE_REMOTE = "me", "them", "spk", "single-remote"
 
 
 @dataclass
@@ -66,6 +66,8 @@ class Names:
         if key == SPEAKER:
             return "Спикер"
         kind, index = key.split(":")
+        if kind == SINGLE_REMOTE:
+            return self.diarized.get(int(index), self.them)
         default = f"{self.them} {int(index) + 1}" if kind == THEM else f"Спикер {int(index) + 1}"
         return self.diarized.get(int(index), default)
 
@@ -233,7 +235,13 @@ def transcribe(
         mic, system = audio[:, 0], audio[:, 1]
         remote = speakers.without_me()
         turns = None if remote.just_one else models.diarizer.diarize(system, remote.count, remote.min, remote.max)
-        theirs, their_language = _transcribe_channel(system, turns, THEM, models, language, terms=terms)
+        key = THEM
+        if remote.count is None and turns is not None:
+            found = {t.speaker for t in turns}
+            if len(found) == 1:
+                key = f"{SINGLE_REMOTE}:{next(iter(found))}"
+                turns = None  # preserve the single speaker's index without splitting the channel
+        theirs, their_language = _transcribe_channel(system, turns, key, models, language, terms=terms)
         mine, my_language = _transcribe_channel(suppress_echo(mic, system), None, ME, models, language, terms=terms)
         return drop_echo(mine, theirs) + theirs, my_language if mine else their_language
 
