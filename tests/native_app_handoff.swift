@@ -11,11 +11,25 @@ final class DaemonClient {
     var calls: [String] = []
     var replies: [(JSON) -> Void] = []
     var connectResult = true
+    var snapshot: JSON = [:]
+    var parameters: [JSON] = []
+    var history: JSON = ["ok": true, "calls": [JSON](), "dictations": [JSON]()]
+    var deferHistory = false
+    var historyReplies: [(JSON) -> Void] = []
     func connect(path: String) -> Bool { isConnected = connectResult; return connectResult }
     func disconnect() { isConnected = false }
     func request(_ cmd: String, _ params: JSON = [:], reply: ((JSON) -> Void)? = nil) {
         calls.append(cmd)
-        if cmd == "subscribe" { reply?(["ok": true, "cloud": cloud, "state": "ready"]); return }
+        parameters.append(params)
+        if cmd == "history" {
+            if deferHistory, let reply { historyReplies.append(reply) }
+            else { reply?(history) }
+            return
+        }
+        if cmd == "subscribe" || cmd == "status" {
+            reply?(["ok": true, "cloud": cloud, "state": "ready"].merging(snapshot) { _, new in new })
+            return
+        }
         if let reply { replies.append(reply) }
     }
     func acknowledge(_ reply: JSON = ["ok": true]) { replies.removeFirst()(reply) }
@@ -23,6 +37,8 @@ final class DaemonClient {
         isConnected = false
         let callbacks = replies; replies.removeAll()
         callbacks.forEach { $0(["ok": false, "error": "connection lost"]) }
+        let historyCallbacks = historyReplies; historyReplies.removeAll()
+        historyCallbacks.forEach { $0(["ok": false, "error": "connection lost"]) }
         onDisconnect?()
     }
 }
@@ -37,6 +53,11 @@ final class DictationController {
     var isEnabled = false
     var busyForHandoff = false
     var onBusyChange: ((Bool) -> Void)?
+    enum Phase { case idle, starting, recording, handsFree, processing }
+    var phase = Phase.idle { didSet { onStateChange?(phase) } }
+    var onStateChange: ((Phase) -> Void)?
+    var onError: ((String) -> Void)?
+    var onResult: ((Bool) -> Void)?
     let hotkey = Hotkey()
     let corrections = Corrections()
     init(daemon: DaemonClient) {}
@@ -47,7 +68,10 @@ final class SetupWindow {
     var onApplying: ((Bool) -> Bool)?
     var onApplied: ((JSON, Bool) -> Void)?
     init(initialCloud: Bool) {}
-    func refresh(_ completion: (JSON?) -> Void) { completion(["completed": true, "mode": "cloud"]) }
+    static func permissionSummary() -> String { "synthetic permissions" }
+    var completed = true
+    var mode = "cloud"
+    func refresh(_ completion: (JSON?) -> Void) { completion(["completed": completed, "mode": mode]) }
     func show(requestCloud: Bool = false) {}
 }
 final class SharingWindow { func show() {} }
@@ -73,7 +97,11 @@ extension AppDelegate {
 }
 
 struct AppHandoffTest {
-    static func make(terminate: @escaping () -> Void = { preconditionFailure("unexpected app termination") }) -> AppDelegate {
+    static func make(devWatchMode: Bool = true, completed: Bool = true, cloud: Bool = true, snapshot: JSON = [:],
+                     showWindow: Bool = false,
+                     history: JSON = [:], deferHistory: Bool = false,
+                     openURL: @escaping (URL) -> Bool = { _ in true },
+                     terminate: @escaping () -> Void = { preconditionFailure("unexpected app termination") }) -> AppDelegate {
         var delegate: AppDelegate!
         var wanted = true
         var effects = AppDelegate.Effects()
@@ -84,7 +112,14 @@ struct AppHandoffTest {
         effects.configureNotifications = { _ in }
         effects.notify = { _, _, _ in }
         effects.scheduleTick = { _ in nil }
-        delegate = AppDelegate(devWatchMode: true, effects: effects)
+        effects.showMainWindow = { if showWindow { $0.window.orderFront(nil) } }
+        effects.openURL = openURL
+        delegate = AppDelegate(devWatchMode: devWatchMode, effects: effects)
+        delegate.setupWindow.completed = completed
+        delegate.setupWindow.mode = cloud ? "cloud" : "local"
+        delegate.daemon.snapshot = snapshot
+        delegate.daemon.deferHistory = deferHistory
+        delegate.daemon.history.merge(history) { _, new in new }
         delegate.applicationDidFinishLaunching(Notification(name: Notification.Name("test")))
         return delegate
     }
@@ -93,6 +128,9 @@ struct AppHandoffTest {
     }
     static func main() {
         _ = NSApplication.shared
+        if CommandLine.arguments.contains("--main-window") { MainWindowTest.run(); return }
+        if CommandLine.arguments.contains("--history-view") { HistoryViewTest.run(); return }
+        if CommandLine.arguments.contains("--history-flow") { HistoryFlowTest.run(); return }
         for (recording, command) in [(false, "record_start"), (true, "record_stop")] {
             let app = make(), daemon = app.handoffTestDaemon
             if recording { daemon.onEvent?(["event": "recording", "active": true]) }

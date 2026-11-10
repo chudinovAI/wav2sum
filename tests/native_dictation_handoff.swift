@@ -16,11 +16,14 @@ struct DictationHandoffTest {
         var starts = 0
         var stops = 0
         var failStart = false
+        var pasteTargetAvailable = true
         var controller: DictationController!
         var requests: [(String, JSON)] = []
         var chunks: [[Float]] = []
         var copied: [String] = []
         var states: [String] = []
+        var errors: [String] = []
+        var deliveries: [Bool] = []
         let effects = DictationController.Effects(
             audio: (start: {
                 starts += 1
@@ -32,7 +35,10 @@ struct DictationHandoffTest {
             context: { around in around ? ["before": "left", "after": "right"] : ["app": "synthetic", "title": "fixture"] },
             selectedText: { selection = $0 },
             target: (begin: {}, invalidate: {}, stop: {},
-                     finish: { { _, _, _, _, done in probe = done; duringInsert?() } }),
+                     finish: {
+                guard pasteTargetAvailable else { return nil }
+                return { _, _, _, _, done in probe = done; duringInsert?() }
+            }),
             hud: (show: { state in
                 switch state { case .listening?: states.append("listening"); case .thinking?: states.append("thinking"); case .success?: states.append("success"); case nil: states.append("hidden") }
             }, preview: { _ in }, contains: { _ in false }),
@@ -45,6 +51,8 @@ struct DictationHandoffTest {
         let corrections = CorrectionWatcher(prepare: { "synthetic" }, focusedElement: { nil })
         controller = DictationController(daemon: DaemonClient(), effects: effects, corrections: corrections)
         controller.isEnabled = true
+        controller.onError = { errors.append($0) }
+        controller.onResult = { deliveries.append($0) }
         precondition(!controller.busyForHandoff)
         failStart = true
         controller.hotkey.updateKey(pressed: true, shift: true, control: false)
@@ -53,6 +61,7 @@ struct DictationHandoffTest {
         precondition(controller.busyForHandoff, "failed microphone startup still waits for selection restoration")
         selection?(nil)
         precondition(!controller.busyForHandoff)
+        precondition(errors.count == 1 && copied.isEmpty && controller.phase == .idle)
         failStart = false
         controller.hotkey.updateKey(pressed: true, shift: true, control: false)
         precondition(startedBusy && controller.busyForHandoff, "starting must be busy before external effects")
@@ -177,6 +186,20 @@ struct DictationHandoffTest {
         probe?()
         controller.corrections.finish()
         precondition(!controller.busyForHandoff)
+        pasteTargetAvailable = false
+        controller.hotkey.updateKey(pressed: true, shift: false, control: false)
+        controller.finish()
+        controller.hotkey.updateKey(pressed: false, shift: false, control: false)
+        response?(["text": "clipboard fallback"])
+        precondition(copied.last == "clipboard fallback" && deliveries.last == false && !controller.busyForHandoff)
+        pasteTargetAvailable = true
+        let copiedBeforeError = copied, deliveriesBeforeError = deliveries
+        controller.hotkey.updateKey(pressed: true, shift: false, control: false)
+        controller.finish()
+        controller.hotkey.updateKey(pressed: false, shift: false, control: false)
+        response?(["error": "synthetic recognition failure"])
+        precondition(errors.last == "synthetic recognition failure" && controller.phase == .idle)
+        precondition(copied == copiedBeforeError && deliveries == deliveriesBeforeError && !controller.busyForHandoff)
 
         // Exercise the actual correction waiting and tracking timers using a fake field identity.
         let field = NSObject()

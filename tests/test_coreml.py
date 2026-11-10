@@ -4,6 +4,35 @@ import torch
 from wav2sum import coreml
 
 
+class GigaAM(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.model = torch.nn.Module()
+        self.model.encoder = torch.nn.Linear(2, 2)
+        self.model.head = torch.nn.Linear(2, 2)
+
+
+def test_gigaam_loader_restores_encoder_and_head_weights_for_conversion(tmp_path, monkeypatch):
+    saved = GigaAM()
+    weights = tmp_path / "pytorch_model.bin"
+    torch.save(saved.state_dict(), weights)
+
+    class AutoModel:  # from_pretrained allocates GigaAM on meta under Transformers 5.
+        @staticmethod
+        def from_config(config, trust_remote_code):
+            return GigaAM()
+
+    monkeypatch.setattr(coreml.AutoConfig, "from_pretrained", lambda *args, **kwargs: "gigaam config")
+    monkeypatch.setattr(coreml, "AutoModel", AutoModel)
+    monkeypatch.setattr(coreml, "hf_hub_download", lambda *args, **kwargs: weights)
+
+    model = coreml._load_gigaam()
+
+    assert torch.equal(model.encoder.weight, saved.model.encoder.weight)
+    assert torch.equal(model.head.weight, saved.model.head.weight)
+    assert not model.training
+
+
 class Subsampling(torch.nn.Module):
     def forward(self, x, lengths):
         return x[:, ::4], torch.div(lengths + 3, 4, rounding_mode="floor")

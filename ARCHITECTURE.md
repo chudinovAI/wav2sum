@@ -1,12 +1,8 @@
 # Архитектура
 
-Карта Python-кода. Её обновляет агент: в PR, который меняет модули, публичные функции или типы, и на структурном ревью. Строится по коду (команда Graph в AGENTS.md), а не по плану. Swift-часть (`wav2sum/native/`) и протокол сокета описаны в SPEC.md.
+Карта реализации Python и Swift: зависимости, API и runtime-контракты. Обновляется при изменении модулей, публичных функций/типов и на структурном ревью; граф строится по коду командой Graph из AGENTS.md, не по плану. Продуктовые критерии и ограничения — в [SPEC](SPEC.md), команды и developer flow — в [README](README.md).
 
-Последняя проверка структуры: упрощение dev-watch, один сборщик для install/bootstrap/watch; дублирующий platform-модуль удалён. Фактический `uv run --offline --no-sync pydeps wav2sum --show-deps --no-output --only wav2sum`: 39 модулей без корневого пакета, 112 внутренних связей; граф ацикличен. Хранение app preferences находится в config, JSON setup bridge — в settings; обратной зависимости config→settings нет.
-
-Запись сохраняется автоматически. По умолчанию stop/startup не ставят её в очередь; отдельный auto-process opt-in ставит успешно завершённую запись в обычную очередь (local transcript-only, cloud с отдельным согласием на автоматические uploads). Вручную доступны TUI process и cloud summary-last. Recording lock и busy guards запрещают configure при recorder/streams/loading/queued/running jobs; смена mode/model сохраняет preferences и завершает idle daemon, native ждёт exit перед новым стартом. Активная/неоднозначная/дублированная/partial запись не перезаписывается. Прямой CLI process вне daemon этими guards не охвачен.
-
-`summarize_last_meeting` — отдельная cloud-only операция: последний собственный completed call по started_at, готовый summary открывается, существующий transcript не распознаётся повторно; queued summary-only job использует уже известный `out_dir`. Формат Job не меняется. Startup/hourly maintenance вызывает atomic seven-day prune только dictations.jsonl и рассылает count-only history_pruned; TUI перечитывает историю. Vocabulary/edits/calls не очищаются.
+Последняя проверка структуры: общий read-only catalog для TUI и native history RPC. Фактический `uv run --offline --no-sync pydeps wav2sum --show-deps --no-output --only wav2sum`: 40 модулей без корневого пакета, 112 внутренних связей; граф ацикличен. Хранение app preferences находится в config, JSON setup bridge — в settings; обратной зависимости config→settings нет.
 
 ## Модули
 
@@ -49,14 +45,13 @@ graph LR
   cloud --> conversation
   cloud --> credentials
   context --> vocabulary
-  conversation --> diarizer
-  coreml --> asr
   coreml --> audio
   coreml --> config
   daemon --> audio
   daemon --> autorecord
   daemon --> calls
   daemon --> capture
+  daemon --> catalog
   daemon --> cloud
   daemon --> config
   daemon --> dictation
@@ -120,6 +115,7 @@ graph LR
   summarizer --> language
   summarizer --> llm
   tui --> client
+  tui --> catalog
   tui --> config
   tui --> history
   vad --> asr
@@ -131,20 +127,21 @@ graph LR
 | `cli` | явный CLI cloud, команды app/daemon/TUI/process/dictate, opt-in dev-watch и JSON setup bridge | audio, build, calls, capture, client, cloud, config, credentials, daemon, devwatch, dictation, models, settings, tui, vocabulary |
 | `devwatch` | debounce, immutable snapshot handoff, повторы/восстановление и безопасное завершение dev-сессии | devwatch_runtime |
 | `devwatch_runtime` | lock, verified exact-child pipes, перепроверка bundle/путей и lifetime только собственного scratch; использует общий builder | build, config |
-| `daemon` | mode/busy/configure guards, manual/opt-in automatic call jobs, ordered dictation/cancel, startup/hourly retention | audio, autorecord, calls, capture, cloud, config, dictation, history, llm, models, vocabulary |
+| `daemon` | mode/busy/configure guards, read-only history RPC, manual/opt-in call jobs, ordered dictation/cancel и retention | audio, autorecord, calls, capture, catalog, cloud, config, dictation, history, llm, models, vocabulary |
 | `client` | клиент сокета демона для CLI и TUI | config |
-| `tui` | Textual: звонки, диктовки, поиск/удаление; refresh истории по history_pruned | client, config, history |
+| `tui` | Textual: общая с GUI выборка звонков, поиск/прежнее удаление и refresh диктовок по history_pruned | catalog, client, config, history |
+| `catalog` | CallEntry из raw WAV/processed meta, дедупликация по resolved audio и прежняя mtime-сортировка; ошибки чтения не скрываются | — |
 | `calls` | local echo/VAD/pyannote/Qwen или Nemotron без summary, backend-specific cache; cloud grounded summary и summary-only | audio, cloud, config, context, conversation, diarizer, echo, language, llm, models, summarizer, vocabulary |
 | `capture` | запись звонка Swift-хелпером в WAV | build |
 | `autorecord` | какое приложение держит микрофон, когда начать и остановить запись | build |
 | `build` | единый immutable snapshot → app/icon/digest/sign, проверка dev signature/layout, атомарная публикация install/bootstrap/watch; bundled capture_helper берётся из проверенного executable env path | config |
 | `echo` | вычитание эха системного канала из микрофона | audio |
-| `conversation` | нарезка по репликам, склейка, формат транскрипта | diarizer |
+| `conversation` | склейка реплик, текстовый echo-filter, формат транскрипта; `Piece` для окон звонка | — |
 | `summarizer` | проверенные видимые ссылки на реплики, source-preserving фрагментация/сведение в пределах контекста; отдельные главы | cloud, language, llm |
 | `dictation` | фиксированный контекст, прямая LLM-чистка без семантических эвристик; cloud upload без preview или incremental local с ограниченным хвостом | audio, cloud, config, context, language, llm, models, vocabulary |
 | `context` | фиксированные ограниченные подсказки и точная транслитерация смешанных алфавитов в заданный термин; без I/O | vocabulary |
 | `models` | lazy режим и call_model, memory warning override, scoped call_session освобождает Qwen/Nemotron | asr, cloud, diarizer, local_models, nemotron, vad |
-| `asr` | pinned offline Qwen для диктовки/лёгких звонков; GigaAM для Core ML-утилиты | audio |
+| `asr` | pinned offline Qwen для диктовки/лёгких звонков | audio |
 | `cloud` | Deepgram batch HTTP для звонков/файлов и один chunked upload диктовки; OpenAI HTTPS с ленивым per-client keepalive; proxy/TLS, безопасные ошибки и запрет редиректов/replay | audio, conversation, credentials |
 | `credentials` | explicit env/Keychain/opt-in beta resource lookup, native secret storage, hidden interactive setup; no passive Keychain read or denial bypass | — |
 | `nemotron` | speech.cpp protocol 3, явные overrides/new model root/legacy paths, on-demand worker и reap | audio, local_models |
@@ -156,7 +153,7 @@ graph LR
 | `history` | история/ручное удаление; atomic seven-day prune под общим lock, сохранение unknown-age и отказ от malformed/unsafe files | audio, config |
 | `config` | TOML, app preference schema/consent, atomic private JSON save/load, runtime-only CLI cloud, shared file lock | — |
 | `audio` | загрузка звука, PCM, хеш файла | — |
-| `coreml` | конвертация GigaAM в Core ML (CHU-98), только macOS | asr, audio, config |
+| `coreml` | CPU-загрузка закреплённого GigaAM и конвертация в Core ML (CHU-98), только macOS | audio, config |
 | `evalset` | WER диктовки на наборе фраз | audio, config, dictation, history, llm, models, vocabulary |
 | `factcheck` | cloud summary с таймкодами; игнорирование ссылок при проверке чисел/имён; требует `--cloud` | cloud, config, context, summarizer, vocabulary |
 | `latency` | read-only p50/p90 частей и local/cloud streaming p50/p95/отношение отправленного к полученному | config |
@@ -174,6 +171,7 @@ graph LR
 | Функция | Вход | Выход | Побочные эффекты | Кто вызывает |
 |---|---|---|---|---|
 | `cli.main` | argv | — | всё, что делает команда | `__main__` |
+| `catalog.list_calls` | recordings_dir, output_dir | `list[CallEntry]` | читает directory entries/meta, не читает transcript content, не пишет и не загружает модели | daemon, tui |
 | `credentials.credential` | имя Deepgram/OpenAI API_KEY | секрет | env → собственный Keychain → opt-in beta resource → ошибка; только cloud; denial fail closed, без фоновых prompts | cloud |
 | `credentials.configure` | экспорт или скрытый интерактивный ввод обоих ключей | — | Security.framework через ctypes, add/update generic-password без удаления ACL; нет argv/конфига/логов с секретом | cli (`cloud-keys`) |
 | `credentials.Keychain` | service/account; get/set | секрет или None для отсутствующего item | native CF/Security API; ошибки доступа не превращаются в отсутствие ключа | credentials |
@@ -221,7 +219,7 @@ graph LR
 | `audio.file_hash` | путь | `str` | читает файл | calls, history |
 | `audio.pcm16_to_float` | `bytes` | `np.ndarray` | нет | daemon |
 | `echo.suppress_echo` | микрофон, системный канал | `np.ndarray` | нет | calls |
-| `conversation.*` | спаны, реплики, `Turn` | реплики, текст | нет | calls |
+| `conversation.build_conversation`, `drop_echo`, `format_transcript` | реплики | реплики, текст | нет | calls |
 | `language.text_language` | финальный текст | RU/EN для промпта | нет | calls, dictation |
 | `config.validate_settings`, `load_preferences`, `save_preferences`, `apply_preferences` | explicit mode/models/consent choices и optional path | validated dict / Config mutation | booleans/enums/отдельные cloud consents; private atomic JSON under shared lock, отказ от unsafe file; ключи не сохраняются | settings, daemon, load_config |
 | `settings.handle`, `settings.main` | local JSON request / stdin pipe | single JSON reply | status без keys/downloads; explicit configure RPC, Keychain save, model prepare, reviewed export; sanitized failures | CLI setup, native DaemonProcess |
@@ -237,6 +235,7 @@ graph LR
 |---|---|---|---|
 | `Config` | `config.py` | прежние поля, `auto_process`, `call_model`, `allow_unsafe_nemotron`, runtime-only `cloud`/`auto_cloud_consent` | app preferences overlay processing only, не CLI cloud; separate upload consent не TOML-флаг |
 | `DictationConfig` | `config.py` | `hotkey`, `model`, `cleanup`, `learn`, `dictionary`, `snippets`, `apps` | — |
+| `CallEntry` | `catalog.py` | `path`, resolved `audio` или None, `meta` или None | frozen dataclass; исходные файлы не изменяет |
 | `Speakers` | `calls.py` | `count`, `min`, `max` | — |
 | `Names` | `calls.py` | `me`, `them`, `diarized` | — |
 | `Result` | `calls.py` | `out_dir`, `layout`, `language`, `duration_sec`, `utterances`, `summary`, `timings` | содержит `Utterance` |
@@ -251,9 +250,77 @@ graph LR
 | `LLM` | `llm.py` | `model`, `num_ctx`, `temperature`, `think`, `keep_alive`, `timeout`, `cache_prefix` | — |
 | `Prompts` | `dictation.py`, `summarizer.py` | тексты промптов на язык | — |
 
+## Native UI и протокол
+
+`MainWindow.swift` и вложенный `HistoryView.swift` — UI-проекции общего с меню состояния `AppDelegate`. Окно показывается после Apply, при обычном completed launch и через Open wav2sum; dev-watch handoff не активирует его. Pending start/stop различаются до ACK; recording.seconds приходит из snapshot и обновляется level-events. Disconnect показывает неизвестное состояние, не остановку. Stop ACK подтверждает saved path; inactive-event — только завершение. После idle Apply перечитывается status для auto-process.
+
+Главное окно использует AppKit sidebar записи/диктовки и горизонтальный list/detail истории. `MainWindow.State.recordingActive` явно выбирает Start/Stop symbol, без разбора текста кнопки. `HistoryCell` переиспользуется таблицей; полные детали и ошибки доступны для выделения, длинный feedback прокручивается, основные действия остаются видимыми. Semantic colors и системные шрифты поддерживают light/dark.
+
+`SetupWindow` — сгруппированная scroll-форма с закреплённым Apply; private `SettingsForm.isFlipped` удерживает начало формы сверху. Главное окно и Settings автоматически пересчитывают native key-view loop при появлении деталей/смене секций; `⌘R` обновляет историю, `⌘,` открывает Settings из главного окна. Согласия, busy/ACK veto и действия с ключами/моделями/permissions остаются прежними.
+
+Swift общается с Python через `~/Library/Application Support/wav2sum/daemon.sock`, JSON-строками. CLI/TUI используют тот же daemon через `client.py`. Управление: `status`, `subscribe`, `history`, `configure`, `record_start`, `record_stop`, `process`, `summarize_last_meeting`, `shutdown`; диктовка: `dictate_audio`, `dictate_cancel`, `dictate`, `correction`.
+
+- `dictate_audio`: PCM-чанк; `first` начинает сессию. Swift передаёт строковый `session` в чанках, финале и отмене. `dictate_cancel` действует на текущую сессию исходного соединения при совпадении ID.
+- Финальный `dictate`: `command`/`translate` выбирают режим, при `streamed` поле `audio` содержит только неотправленный хвост; `before`/`after` — до 20 символов вокруг курсора для `fit_to_cursor`. Клиенты без `session` не запрашивают preview.
+- `dictation_preview` содержит `session`/`text` и идёт только исходному соединению. Неизменившийся текст и поздние события завершённой/заменённой/отменённой сессии отбрасываются. Это дедупликация события, не гарантия отсутствия повторной работы ASR.
+- `history` требует совпадающий `cloud`, но не credentials/модели/API. Ответ: `calls`, `dictations`, `recordings_dir`, `output_dir`. Call содержит `id/path/title`, resolved `audio`, nullable `out_dir/open_path`, `state/stage/error`, `duration_sec`, `speakers`; latest job и active recorder накладываются на read-only catalog. Dictation содержит content-derived ID с ordinal одинаковых записей, `time/text/raw/mode`; прежние последние 500 записей, без записи ID в JSONL.
+- Native подписывается до чтения истории; один in-flight request и revision/token отбрасывают snapshot после события/disconnect/смены соединения. Selection сохраняется по ID, raw→processed — только по единственному audio match; удаление/неоднозначность снимают её. Read failures явные; disconnect/mode mismatch запрещают stale actions. Level events не перезагружают таблицы.
+- `history_pruned` содержит только `deleted` count: TUI перечитывает историю, native запрашивает snapshot. `DictationController.Phase` и error/result callbacks обновляют главное окно; оно и Settings используют общий `permissionSummary`. Paste request не считается подтверждённой вставкой.
+
+## Runtime и lifecycle
+
+### Режим, модели и ключи
+
+CLI `--cloud` не сохраняется в TOML и не выводится из наличия ключей. JSON bridge `wav2sum setup` читает/сохраняет явные app preferences. `configure` валидирует согласия под recording lock и отклоняется при recorder/streams/loading/queued/running jobs. Смена mode/model сохраняет preferences и завершает idle daemon; native ждёт старый socket перед новым стартом. Auto-process-only применяется live. CLI fallback допустим только при недоступном socket, не отказе запроса; несовпадающий cloud-флаг отвергается до ASR/process/summary-last/subscribe/history.
+
+Local preload — Qwen/VAD/Gemma диктовки. Отдельный `call_session` выбирает Qwen/Nemotron, освобождает call ASR в finally и reap-ит worker; cache hit не загружает его. У моделей и ленивой загрузки раздельные locks по имени. Pinned snapshots готовятся явно; подготовленный pyannote работает без токена, telemetry выключена. Gated access принимает пользователь, токен подготовки не сохраняется. Cloud warmup проверяет keys без paid-запросов; исправление настроек перезапускает только idle failed daemon.
+
+Cloud credentials: env → собственный Keychain → opt-in beta resource → ошибка. Keychain denial не обходится; ресурс не импортируется автоматически. CLI hidden input и native secure fields передают секреты по stdin pipe, не argv/логам. Add/update сохраняет прежние service/accounts и ACL. Passive status проверяет presence, не читает Keychain; Local ключи не читает. Private-beta builder получает оба friend-ключа явно в интерактивном terminal, не обнаруживает их в env/Keychain; обычная сборка не включает ресурс.
+
+### Диктовка
+
+Swift отправляет новые PCM каждые 1 с local / 250 мс cloud и остаток при release. Local использует независимое состояние Silero по 512 samples, completed spans и изменяемый recognition tail; preview не используется как финал. Qwen checkpoint закреплён на `bcd2b5b7f32b480ab5790554cfa8347f246a14f3`. Local HUD 320×80 перетаскивается без активации и сохраняет позицию в процессе; клик по нему не инвалидирует target. Cloud HUD 190×40 пропускает клики и не показывает текстовый preview.
+
+Cloud начинает один HTTP/1.1 chunked upload raw linear16/16 кГц/mono с первым непустым PCM; EOF идёт после последнего чанка, полный HTTP response — единственный финал. Повторного ASR/replay нет. Backlog ограничен: overflow завершает сессию ошибкой, не теряет молча чанки; один готовый большой вход допустим. Finish single-flight, успешный ответ кэшируется, deadline — 20 с после закрытия входа; HTTP timeout звонков — 300 с. Upload перекрывает setup со временем речи, не доказывает начало provider inference или гарантии chunked buffering.
+
+`DictationContext` фиксирует стиль, язык, snippets, термины и исправления при первом чанке. До 50 уникальных терминов/500 UTF-8 bytes без управляющих символов: Qwen contextual prompt, Deepgram repeated keyterm, Nemotron worker prompt; cache звонков различает контекст. Mixed Cyrillic/Latin нормализуется только при точной транслитерации заданного термина, без fuzzy/обучения. Nova-3 auto использует `multi` с RU/EN language hints, explicit ru/en — fixed language без hints. Nemotron 0.9.4 валидирует language, но не ограничивает им ASR; явный язык выбирает язык результата.
+
+LLM получает исходный ASR со snippet-маркерами, без regex-подготовки самокоррекций/семантических postchecks; непустой успешный ответ принимается. Обычная ошибка/пустой ответ сохраняет raw, ошибка перевода ничего не вставляет. Словарь, snippets, стиль и подгонка к курсору остаются. Cloud cleanup — `gpt-6-luna`, Fast; summary — `gpt-6.1-terra` без явного Fast. Оба через Chat Completions с `reasoning_effort=none`.
+
+Финальный запрос захватывает исходную сессию в порядке чтения сокета до фоновой обработки, также без `session`; последующие запросы не блокируются LLM. Cancel/замена/disconnect/shutdown закрывают транспорт и отбрасывают поздний результат до вставки/history. Cloud close будит finish, очищает backlog и best-effort закрывает active socket без ожидания сети; уже начатые DNS/connect или local inference могут завершиться позже. Отправленный неоднозначно POST не повторяется. При завершении daemon ждёт in-flight model work; CLI/factcheck закрывают своих LLM в finally, cancellation сохраняет CancelledError даже при ошибке фоновой работы.
+
+### LLM worker и transport
+
+MLX работает в одном потоке `llm`. Запрос с timeout может выполняться между prefill/token steps обычной генерации; просроченная диктовка отменяется с raw fallback. Одинаковые модели делят веса. Idle unload освобождает и веса, и prefix cache; `llm_memory_mb` учитывает их отдельно от model memory. Prefix cache хранит до четырёх token-prefix entries на модель и генерирует на копии; summary без prefix cache. Prompt lookup для clean ищет последние 3/2/1 токена в prompt, предлагает до четырёх draft tokens; перевод/команда идут обычной генерацией. `user_examples` берёт по три последних допустимых edits на стиль/язык, иначе статичные; snapshot до restart сохраняет cache hits, `learn=false` запрещает запись.
+
+`_draft` сохраняет longest suffix (3→2→1), затем latest match, включая overlap/короткий результат. Candidate tokens сравниваются по индексам без временных списков; копируется только возвращаемый draft. При size=0 поиск не выполняется. Это оптимизация Python lookup, не смена sampling/model/cache и не доказанное ускорение полного inference.
+
+На OpenAILLM — одно direct HTTP/1.1 соединение с lock и verified TLS. Proxy остаётся на urllib без pooling/direct preconnect. Непустое cloud audio при cleanup запускает один best-effort TCP/TLS warming worker без HTTP/keys/text; продолжение аудио обновляет обнаруженный закрытый peer, idle reconnect timer отсутствует. Connect вне transport lock: foreground не ждёт warming и при miss идёт штатно. Peer отбрасывается перед POST, если закрытие обнаружено. `unload` закрывает transport и инвалидирует pending connect по generation: поздний socket не заменяет активный и не восстанавливает закрытый клиент. DNS/connect cancellation best-effort, неоднозначная ошибка POST не вызывает replay.
+
+### Звонки и результаты
+
+Stop/startup по умолчанию не enqueue-ят обработку. Opt-in ставит успешно завершённую запись в обычную очередь: local transcript-only, cloud — с отдельным auto-upload consent. Capture error не запускает job. Guards active/duplicate/ambiguous/partial защищают daemon requests, не прямой CLI. Local pipeline: echo → VAD/pyannote → Qwen windows до 20 с или Nemotron до 50 с без пересечения говорящих/выдуманных word timestamps; язык определяется по каналу, язык результата — мой канал либо собеседник, если я молчал. Системный канал допускает 1–6 собеседников, один остаётся без номера; явное speaker-name имеет приоритет. Cloud использует Deepgram utterances/diarize и grounded summary.
+
+`summarize_last_meeting` cloud-only выбирает собственный completed call по started_at с fallback audio chronology, не mtime output. Готовый summary возвращает `{out_dir, already_done:true}`; иначе `{job}`, queued summary-only уже содержит out_dir существующего transcript. Raw идёт полным pipeline, готовый transcript — без audio/ASR. Running job переиспользуется; unfinished sidecar, ambiguous и partial output отклоняются. Только отсутствующий summary.md публикуется атомарно, исходники не переписываются; новое завершение уведомляет без принудительного открытия. Native in-flight guard исключает повторный UI request.
+
+Grounded summary проверяет существование и видимость `[U… время]` в текущей части/заметках, не semantic entailment. Длинная реплика делится с тем же настоящим ID/диапазоном, map/reduce укладывается в token context; factcheck не считает citations новыми числами/именами. Optional chapters — отдельный вызов, привязка времени к реплике в пределах 5 с и сведение сверх восьми строк; их ошибка не отменяет успешный transcript/summary.
+
+### Dev-watch и экспорт
+
+Watcher управляет только собственным подписанным dev child. Общий builder делает immutable snapshot/app/icon/framed digest и сохраняет совместимую Info.plist. Main-thread handoff блокирует новую диктовку и ждёт capture/finalize/selection/insertion probe/correction и control ACK; daemon/recording/jobs не останавливает. Editor saves после ready переходят в следующую сборку. Failed build сохраняет latest attempt с backoff; отказ запуска допускает verified rollback, неопределённость останавливает exchange без сигналов/повтора. Только после ACK нового child удаляются собственные scratch/previous bundle, не старые каталоги. Защиты от враждебного writer между проверкой и syscall нет. Bootstrap, Ctrl-C/recovery и ограничения параллельного запуска — в README.
+
+`sharing` читает history/edits под прежними locks и выдаёт content-stable IDs. UI фильтрует и выбирает только показанное; правка target снимает confirmation. Export повторно разрешает IDs по текущим источникам, требует consent/confirmed target и атомарно создаёт private JSONL без overwrite. Только allowlisted text, без timestamps/app/title/paths/audio/calls/network; источники не меняются, экспорт не входит в seven-day retention.
+
+### Метрики и исследовательские инструменты
+
+`timings.preview` — от первого полученного audio до первого preview (local и исторический cloud WS); `finalize` — от захвата streamed final request до готовности Dictation, включая readiness/in-flight step/worker waits, до append/broadcast/reply. `asr` оборачивает finish/recognize, `llm` — clean/command/translate с обработкой текста: очереди, transport и provider inference ими не разделены. `asr_live` — local работа во время речи, не post-release/cloud latency. Cloud `audio_sent/audio_received` — секунды; успешный sent отражает полный submitted audio, не acknowledgement чанков/биллинг. `latency` разделяет local/cloud, но исторические WS/batch-записи не являются baseline текущего upload. HTTP headers/TTFB wait тоже не отделяет сеть от работы провайдера.
+
+Swift логирует event-tap release→ready/send и отдельный insertion probe в app.log. Ready timestamp берётся после ответа и target safety checks, send — перед отправкой ⌘V; hands-free завершение нажатием не является key-up release. Probe измеряет интервал до точного AX-значения исходного поля после замены UTF-16 selection. Проверки раз в 25 мс не дольше 2 с после send; интервал — наблюдаемая неопределённость, не гарантированная ошибка ≤25 мс. Missing AX/неизменившееся поле/mismatch/timeout — unavailable/unconfirmed; clipboard-only не измеряется. Текст поля не логируется; это не screen paint/физический контакт клавиши. Отдельный synthetic helper не наследует TCC grants рабочего app и не доказывает production release→paste.
+
+`evalset` — append-only нумерация 46 эталонных фраз, отдельные ASR/clean WER и термины; фиксированный seed чистки, не semantic-quality score. `factcheck --cloud` — новый paid summary выбранных transcript, числовые/именные расхождения не проверяют связь двух верных фактов и числа словами. Core ML-конвертер GigaAM не включён в runtime приложения; его прошлые ANE-результаты не переносятся на текущие Qwen/Nemotron.
+
 ## Известные проблемы
 
 - `daemon.py`: битая JSON-строка закрывает соединение без отдельного ответа/лога (CHU-153); `json.loads` уже находится внутри `try`, прежнее описание «вне try» устарело.
-- `conversation.split_by_turns` и его helpers остались только с тестовыми вызовами: это прежняя параллельная политика назначения спикеров. Текущий runtime использует `calls._call_windows`; удаление старого публичного API требует отдельной проверки совместимости, в финальном аудите его не удаляли.
 - `summarizer.chunk_transcript` намеренно не дробит одну длинную реплику для optional chapters. Монолог может превысить контекст провайдера; основной grounded summary использует другой bounded splitter. Ошибка optional chapters теперь не отменяет публикацию успешного transcript/summary; смену контракта chunker не делали.
 - Development capture/autorecord по-прежнему могут собирать helper через build.capture_helper; standalone app передаёт уже собранный helper, поэтому Xcode на машине получателя не нужен.

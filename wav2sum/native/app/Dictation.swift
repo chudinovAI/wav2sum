@@ -808,14 +808,17 @@ final class CorrectionWatcher {
 final class DictationController {
     var isEnabled = false
     var onBusyChange: ((Bool) -> Void)?
+    var onStateChange: ((Phase) -> Void)?
+    var onError: ((String) -> Void)?
+    var onResult: ((_ insertionRequested: Bool) -> Void)?
 
     let hotkey = Hotkey()
     let corrections: CorrectionWatcher
     private let effects: Effects
     private let daemon: DaemonClient
 
-    private enum Phase { case idle, starting, recording, handsFree, processing }
-    private var phase = Phase.idle
+    enum Phase { case idle, starting, recording, handsFree, processing }
+    private(set) var phase = Phase.idle { didSet { onStateChange?(phase) } }
     private var pendingSelections = 0
     private var pendingProbes = 0
     private var startingCalls = 0
@@ -975,6 +978,7 @@ final class DictationController {
             Log.write("microphone failed: \(error)")
             self.session = nil
             phase = .idle
+            onError?("Microphone: \(error.localizedDescription)")
             return
         }
         guard phase == .starting, self.session == session else {
@@ -1061,10 +1065,12 @@ final class DictationController {
                 }
                 self.effects.hud.show(.success)
                 if insert != nil && !self.command && !self.translate { self.corrections.track(text) }
+                self.onResult?(insert != nil)
             } else {
                 self.effects.hud.show(nil)
                 if let error = reply["error"] as? String {
                     Log.write("dictation failed: \(error)")
+                    self.onError?(error)
                     NSSound.beep()
                 }
             }

@@ -9,10 +9,14 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from huggingface_hub import hf_hub_download
+from transformers import AutoConfig, AutoModel
 
-from wav2sum.asr import Transcriber
 from wav2sum.audio import SAMPLE_RATE, load_audio
 from wav2sum.config import STATE_DIR, load_config
+
+MODEL_ID = "ai-sage/GigaAM-v3"
+REVISION = "e2e_rnnt"
 
 OUT = STATE_DIR / "gigaam-encoder.mlpackage"
 SHAPE_SECONDS = (5, 10, 20)
@@ -57,7 +61,7 @@ def main():
     from coremltools.models.utils import MultiFunctionDescriptor, save_multifunction
 
     _register_int_op()
-    model = Transcriber("cpu").model
+    model = _load_gigaam()
     encoder = MaskedEncoder(model.encoder).eval()
     shapes = {s: _features(model, np.zeros(s * SAMPLE_RATE, dtype=np.float32)).shape for s in SHAPE_SECONDS}
     frames = {shape[-1]: s for s, shape in shapes.items()}
@@ -112,6 +116,16 @@ def main():
         encoded = torch.from_numpy(out["encoded"][..., :expected_length]).float()
         cosine = torch.nn.functional.cosine_similarity(encoded.flatten(), expected.flatten(), dim=0)
         print(f"{name} {seconds:>2} s: cosine {cosine:.4f}")
+
+
+def _load_gigaam() -> torch.nn.Module:
+    # Transformers 5 builds from_pretrained on meta, but GigaAM's remote __init__ creates real tensors.
+    # Build from config and load weights on CPU before passing the model to the converter.
+    config = AutoConfig.from_pretrained(MODEL_ID, revision=REVISION, trust_remote_code=True)
+    model = AutoModel.from_config(config, trust_remote_code=True)
+    weights = hf_hub_download(MODEL_ID, "pytorch_model.bin", revision=REVISION)
+    model.load_state_dict(torch.load(weights, map_location="cpu", weights_only=True))
+    return model.model.cpu().eval()
 
 
 def _register_int_op():

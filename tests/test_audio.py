@@ -4,7 +4,6 @@ import numpy as np
 import pytest
 from scipy.io import wavfile
 
-from wav2sum.asr import MAX_BATCH_ITEMS, _batches
 from wav2sum.audio import SAMPLE_RATE, file_hash, load_audio, pcm16_to_float
 
 
@@ -47,13 +46,3 @@ def test_unreadable_audio_names_the_file(tmp_path):
     path.write_bytes(b"not audio")
     with pytest.raises(RuntimeError, match=r"broken\.mp3"):
         load_audio(path, channels=1)
-
-
-def test_asr_batches_cover_every_span_within_limits():
-    spans = [(0.0, 15.0)] * 12 + [(0.0, 2.0)] * 30
-    batches = list(_batches(spans))
-    assert sorted(i for batch in batches for i in batch) == list(range(len(spans)))
-    for batch in batches:
-        assert len(batch) <= MAX_BATCH_ITEMS
-        assert sum(spans[i][1] - spans[i][0] for i in batch) <= 160
-    assert set(batches[0]) <= set(range(12))

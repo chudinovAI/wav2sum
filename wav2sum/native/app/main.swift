@@ -12,11 +12,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     private var applyingSettings = false
     private var waitingForExit = false
     lazy var setupWindow = SetupWindow(initialCloud: CommandLine.arguments.contains("--cloud"))
+    lazy var mainWindow = MainWindow()
     private lazy var sharingWindow = SharingWindow()
     private var connectionError: String?
     private var subscribed = false
     private var summaryRequestPending = false
-    private var recordingRequestPending = false
+    private enum RecordingRequest { case start, stop }
+    private var recordingRequest: RecordingRequest?
+    private var recordingRequestPending: Bool { recordingRequest != nil }
+    private var recordingStateUnknown = false
+    private var recordingMessage = ""
+    private var recordingFailed = false
+    private var historyCalls: [JSON] = []
+    private var historyDictations: [JSON] = []
+    private var historyRevision = 0
+    private var historyRequestSerial = 0
+    private var historyInFlight: Int?
+    private var historyDirty = true
+    private var historyReadError: String?
+    private var historyActionError: String?
+    private var historyProcessPending = false
+    private var connectionGeneration = 0
+    private var dictationMessage = ""
+    private var dictationFailed = false
+    private var permissionSummary = ""
     private let pendingActions = DevWatchPending()
     private var deferredSettingsStart = false
     private let devWatchMode: Bool
@@ -33,6 +52,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         var read: (DevWatch) -> Void = { $0.startReading() }
         var terminate: () -> Void = { NSApp.terminate(nil) }
         var configureNotifications: (UNUserNotificationCenterDelegate) -> Void = { UNUserNotificationCenter.current().delegate = $0 }
+        var showMainWindow: (MainWindow) -> Void = { $0.show() }
+        var openURL: (URL) -> Bool = { NSWorkspace.shared.open($0) }
         var notify: (String, String, [String: String]) -> Void = { title, body, userInfo in
             let content = UNMutableNotificationContent()
             content.title = title
@@ -68,7 +89,83 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     private var isRecording: Bool { status["recording"] is JSON }
     private var jobs: [JSON] { status["jobs"] as? [JSON] ?? [] }
 
+    private var recordActionTitle: String {
+        if let recordingRequest { return recordingRequest == .stop ? "Stopping…" : "Starting…" }
+        return isRecording ? "Stop Recording" : "Start Call Recording"
+    }
+    private var canToggleRecording: Bool {
+        !(devWatch?.prepared ?? false) && !recordingRequestPending && !recordingStateUnknown
+            && (isReady || (isRecording && isConnected && subscribed))
+    }
+    private var backgroundTitle: String {
+        let showOn = devWatchMode && !isConnected && startedAt == nil
+        return daemonWanted && !showOn ? "Turn Off Background Process" : "Turn On Background Process"
+    }
+    private var canToggleBackground: Bool {
+        !(devWatch?.prepared ?? false) && setupCompleted && !applyingSettings && !waitingForExit
+            && connectionError == nil && (!isConnected || subscribed)
+    }
+    private var connectionDescription: String {
+        if !setupCompleted { return "Setup required" }
+        if applyingSettings || waitingForExit { return "Applying settings…" }
+        if let connectionError { return connectionError }
+        if !isConnected {
+            return devWatchMode && startedAt == nil ? "Off" : (daemonWanted ? "Starting…" : "Off")
+        }
+        if !isReady { return "Loading models…" }
+        let megabytes = (status["memory_mb"] as? Int ?? 0) + (status["llm_memory_mb"] as? Int ?? 0)
+        return String(format: "Ready · %.1f GB", Double(megabytes) / 1024)
+    }
+    private var recordingDescription: String {
+        if recordingStateUnknown { return "Recording status unknown. Reconnect before starting or stopping a call." }
+        if isRecording {
+            let source = ((status["recording"] as? JSON)?["auto"] as? String)
+                .map { "Automatic — \(appName($0))" } ?? "Manual recording"
+            return "\(source) · microphone + system audio"
+        }
+        return "Record your microphone and system audio together."
+    }
+    private var canProcessHistory: Bool {
+        isReady && !(devWatch?.prepared ?? false) && !historyProcessPending && historyInFlight == nil
+            && historyReadError == nil && historyActionError == nil
+    }
+    private var dictationDescription: String {
+        let phase: String
+        switch dictation.phase {
+        case .idle: phase = dictationEnabled ? "Ready to dictate" : "Dictation unavailable"
+        case .starting: phase = "Starting microphone…"
+        case .recording: phase = "Listening"
+        case .handsFree: phase = "Listening · hands-free"
+        case .processing: phase = "Processing dictation…"
+        }
+        return "\(phase)\nHold \(dictation.hotkey.key.label) to dictate into a text field; double-tap for hands-free. Safe insertion or clipboard fallback."
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        permissionSummary = SetupWindow.permissionSummary()
+        mainWindow.onRecord = { [weak self] in self?.toggleRecording() }
+        mainWindow.onSettings = { [weak self] in self?.openSettings() }
+        mainWindow.onBackground = { [weak self] in self?.toggleDaemon() }
+        mainWindow.history.onRefresh = { [weak self] in self?.refreshHistory(clearError: true) }
+        mainWindow.history.onProcess = { [weak self] in self?.processHistory($0) }
+        mainWindow.history.onOpen = { [weak self] in self?.openHistoryResult($0) }
+        dictation.onStateChange = { [weak self] phase in
+            guard let self else { return }
+            if phase == .starting { self.dictationMessage = ""; self.dictationFailed = false }
+            self.updateIcon()
+        }
+        dictation.onError = { [weak self] error in
+            self?.dictationMessage = error
+            self?.dictationFailed = true
+            self?.updateIcon()
+        }
+        dictation.onResult = { [weak self] insertionRequested in
+            self?.dictationMessage = insertionRequested
+                ? "Text copied to the clipboard; insertion requested in the original field."
+                : "Text copied to the clipboard. The insertion target changed or is unavailable."
+            self?.dictationFailed = false
+            self?.updateIcon()
+        }
         if devWatchMode {
             signal(SIGPIPE, SIG_IGN)
             let watch = DevWatch(
@@ -76,7 +173,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
                     self.map { $0.dictation.busyForHandoff || $0.pendingCorrections.isBusy || $0.pendingActions.isBusy || $0.settingsUncertain || $0.applyingSettings || $0.waitingForExit || $0.deferredSettingsStart } ?? true
                 },
                 isReady: { [weak self] in self?.isReady ?? false },
-                setEnabled: { [weak self] in self?.dictation.isEnabled = $0 },
+                setEnabled: { [weak self] enabled in
+                    self?.dictation.isEnabled = enabled
+                    self?.updateIcon()
+                },
                 respond: { [weak self] response in
                     do { try self?.effects.respond(response) }
                     catch { self?.devWatch?.eof() }
@@ -116,7 +216,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             self.applyingSettings = false
             self.startedAt = nil
             self.dictation.isEnabled = self.dictationEnabled
+            if !restart && self.isConnected {
+                self.daemon.request("status") { [weak self] reply in self?.apply(status: reply) }
+            }
             self.tick()
+            self.updateIcon()
+            self.effects.showMainWindow(self.mainWindow)
         }
 
         daemon.onEvent = { [weak self] in self?.handle(event: $0) }
@@ -151,12 +256,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             self.daemon.cloud = self.cloud
             if !self.setupCompleted { self.setupWindow.show(requestCloud: requestCloud) }
             self.tick()
+            if self.setupCompleted && !self.devWatchMode { self.effects.showMainWindow(self.mainWindow) }
         }
         reconnectTimer = effects.scheduleTick { [weak self] in self?.tick() }
         updateIcon()
     }
 
     func tick() {
+        let permissions = SetupWindow.permissionSummary()
+        if permissions != permissionSummary { permissionSummary = permissions; updateIcon() }
         guard !(devWatch?.prepared ?? false) else { return }
         deferredSettingsStart = false
         guard setupCompleted && !applyingSettings else { updateIcon(); return }
@@ -184,12 +292,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     }
 
     private func disconnected() {
+        connectionGeneration += 1
+        historyRevision += 1
+        historyInFlight = nil
+        historyDirty = true
+        historyProcessPending = false
+        historyReadError = "Background process disconnected"
+        if dictation.phase != .idle {
+            dictationMessage = "Connection lost; the active dictation was cancelled."
+            dictationFailed = true
+        }
         status = [:]
+        recordingStateUnknown = true
+        recordingRequest = nil
+        recordingSeconds = 0
         subscribed = false
         connectionError = nil
         summaryRequestPending = false
         dictation.disconnected()
         dictation.isEnabled = false
+        renderHistory()
         updateIcon()
     }
 
@@ -198,6 +320,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             subscribed = false
             connectionError = reply["error"] as? String ?? "Subscription failed"
             dictation.isEnabled = false
+            renderHistory()
             updateIcon()
             return
         }
@@ -205,35 +328,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             subscribed = false
             connectionError = "Background process mode mismatch"
             dictation.isEnabled = false
+            renderHistory()
             updateIcon()
             return
         }
         subscribed = true
-        connectionError = reply["state"] as? String == "failed" ? reply["error"] as? String : nil
+        connectionError = reply["state"] as? String == "failed"
+            ? (reply["error"] as? String ?? "Background process failed; open Settings") : nil
         status = reply
+        recordingSeconds = (reply["recording"] as? JSON)?["seconds"] as? Double ?? 0
+        if recordingStateUnknown { recordingMessage = ""; recordingFailed = false }
+        recordingStateUnknown = false
         if let key = Hotkey.Key(rawValue: status["hotkey"] as? String ?? "") { dictation.hotkey.key = key }
         dictation.isEnabled = dictationEnabled
         updateIcon()
+        refreshHistory()
     }
 
     private func handle(event: JSON) {
-        guard subscribed && connectionError == nil else { return }
+        guard subscribed else { return }
         switch event["event"] as? String {
         case "dictation_preview":
-            dictation.receive(event: event)
+            if connectionError == nil { dictation.receive(event: event) }
         case "state":
             status["state"] = event["state"]
             if event["state"] as? String == "failed" {
                 connectionError = event["error"] as? String ?? "Selected models or credentials are unavailable; open Settings"
+            } else if event["state"] as? String == "ready" {
+                connectionError = nil
             }
             dictation.isEnabled = dictationEnabled
         case "recording":
             let active = event["active"] as? Bool == true
             status["recording"] = active ? ["path": event["path"] ?? "", "auto": event["auto"] ?? NSNull()] as JSON : nil
             recordingSeconds = 0
+            if !active && !recordingRequestPending, let path = event["path"] as? String {
+                recordingMessage = "Recording ended.\n\(path)"
+                recordingFailed = false
+            }
             if active, let app = event["auto"] as? String {
                 notify(title: "Recording \(appName(app)) call", body: "Stops by itself when the call ends.")
             }
+            refreshHistory()
         case "level":
             recordingSeconds = event["seconds"] as? Double ?? recordingSeconds
         case "job":
@@ -242,6 +378,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             status["jobs"] = list
             if event["state"] as? String == "done" { notifyDone(job: event) }
             if event["state"] as? String == "failed" { notify(title: "Couldn't process the recording", body: event["error"] as? String ?? "") }
+            refreshHistory()
+        case "dictation", "history_pruned":
+            refreshHistory()
         default:
             break
         }
@@ -251,40 +390,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
 
-        let header: String
-        if !setupCompleted {
-            header = "wav2sum — setup required"
-        } else if applyingSettings || waitingForExit {
-            header = "wav2sum — applying settings…"
-        } else if let error = connectionError {
-            header = "wav2sum — \(cloud ? "cloud" : "local") · \(error)"
-        } else if !isConnected {
-            let state = devWatchMode && startedAt == nil ? "off" : (daemonWanted ? "starting…" : "off")
-            header = "wav2sum — \(cloud ? "cloud" : "local") · \(state)"
-        } else if !isReady {
-            header = "wav2sum — \(cloud ? "cloud" : "local") · loading models…"
-        } else {
-            let megabytes = (status["memory_mb"] as? Int ?? 0) + (status["llm_memory_mb"] as? Int ?? 0)
-            header = String(format: "wav2sum — %@ · ready · %.1f GB", cloud ? "cloud" : "local", Double(megabytes) / 1024)
-        }
-        menu.addItem(disabled(header))
+        menu.addItem(item("Open wav2sum", #selector(openMainWindow)))
+        menu.addItem(disabled("wav2sum — \(cloud ? "Cloud" : "Local") · \(connectionDescription)"))
 
-        let showOn = devWatchMode && !isConnected && startedAt == nil
-        let toggle = item(daemonWanted && !showOn ? "Turn Off Background Process" : "Turn On Background Process", #selector(toggleDaemon))
-        toggle.isEnabled = !(devWatch?.prepared ?? false) && setupCompleted && !applyingSettings && !waitingForExit && connectionError == nil && (!isConnected || subscribed)
+        let toggle = item(backgroundTitle, #selector(toggleDaemon))
+        toggle.isEnabled = canToggleBackground
         menu.addItem(toggle)
         menu.addItem(.separator())
 
-        if isRecording {
-            let source = ((status["recording"] as? JSON)?["auto"] as? String).map { " (\(appName($0)))" } ?? ""
-            let record = item("■ Stop Recording\(source)  \(clock(recordingSeconds))", #selector(toggleRecording))
-            record.isEnabled = !(devWatch?.prepared ?? false) && !recordingRequestPending
-            menu.addItem(record)
-        } else {
-            let record = item("● Record Call", #selector(toggleRecording))
-            record.isEnabled = isReady && !(devWatch?.prepared ?? false) && !recordingRequestPending
-            menu.addItem(record)
-        }
+        let record = item(recordActionTitle, #selector(toggleRecording))
+        record.isEnabled = canToggleRecording
+        menu.addItem(record)
+        if isRecording { menu.addItem(disabled("\(clock(recordingSeconds)) · \(recordingDescription)")) }
 
         let summary = item(cloud ? "Summarize Last Meeting" : "Summarize Last Meeting (requires cloud mode)", #selector(summarizeLastMeeting))
         summary.isEnabled = !(devWatch?.prepared ?? false) && cloud && isReady && !isRecording && !summaryRequestPending
@@ -344,6 +461,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     }
 
     private func updateIcon() {
+        mainWindow.update(.init(
+            status: "\(cloud ? "Cloud" : "Local") · \(connectionDescription)",
+            recording: recordingDescription, elapsed: clock(recordingSeconds), recordingActive: isRecording,
+            recordTitle: recordActionTitle, recordEnabled: canToggleRecording,
+            backgroundTitle: backgroundTitle, backgroundEnabled: canToggleBackground,
+            processing: !subscribed ? "Connect to see the automatic processing settings."
+                : status["auto_process"] as? Bool == true
+                    ? "Stopping saves the audio. Automatic processing is enabled in Settings."
+                    : "Stopping saves the audio locally. Automatic processing is off.",
+            dictation: dictationDescription, permissions: permissionSummary,
+            dictationMessage: dictationMessage, dictationIsError: dictationFailed,
+            message: recordingMessage, messageIsError: recordingFailed))
+        mainWindow.history.cloud = cloud
+        mainWindow.history.setProcessingEnabled(canProcessHistory)
         guard let button = statusItem.button else { return }
         let busy = !isReady || jobs.contains { ["queued", "running"].contains($0["state"] as? String) }
         if isRecording || dictating {
@@ -358,9 +489,82 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         button.title = isRecording ? " \(clock(recordingSeconds))" : needsPermission ? " !" : (isConnected && busy ? " …" : "")
     }
 
-    private func actionRequest(_ command: String, reply: @escaping (JSON) -> Void = { _ in }) {
+    private func refreshHistory(clearError: Bool = false) {
+        if clearError { historyReadError = nil; historyActionError = nil }
+        historyRevision += 1
+        historyDirty = true
+        loadHistory()
+    }
+
+    private func loadHistory() {
+        guard isConnected && subscribed else { renderHistory(); return }
+        guard historyDirty && historyInFlight == nil else { return }
+        historyDirty = false
+        historyReadError = nil
+        historyRequestSerial += 1
+        let token = historyRequestSerial
+        let revision = historyRevision
+        historyInFlight = token
+        renderHistory()
+        daemon.request("history") { [weak self] reply in
+            guard let self, self.historyInFlight == token else { return }
+            self.historyInFlight = nil
+            guard self.isConnected && self.subscribed else { self.renderHistory(); return }
+            if revision != self.historyRevision { self.loadHistory(); return }
+            if reply["ok"] as? Bool == true,
+               let calls = reply["calls"] as? [JSON], let dictations = reply["dictations"] as? [JSON] {
+                self.historyCalls = calls
+                self.historyDictations = dictations
+            } else {
+                self.historyReadError = reply["error"] as? String ?? "Could not read history"
+            }
+            self.renderHistory()
+        }
+    }
+
+    private func renderHistory() {
+        let connection = isConnected && subscribed ? nil : "Connect to the background process to read history."
+        mainWindow.history.update(calls: historyCalls, dictations: historyDictations,
+                                  canProcess: canProcessHistory, isLoading: historyInFlight != nil,
+                                  error: historyReadError ?? historyActionError ?? connection)
+    }
+
+    private func processHistory(_ selected: JSON) {
+        guard canProcessHistory, let id = selected["id"] as? String,
+              let entry = historyCalls.first(where: { $0["id"] as? String == id }),
+              let path = entry["path"] as? String,
+              ["raw", "failed"].contains(entry["state"] as? String ?? ""),
+              entry["out_dir"] as? String == nil else { return }
+        historyProcessPending = true
+        let generation = connectionGeneration
+        updateIcon()
+        actionRequest("process", ["path": path]) { [weak self] reply in
+            guard let self, generation == self.connectionGeneration else { return }
+            self.historyProcessPending = false
+            if reply["ok"] as? Bool == true, let job = reply["job"] as? JSON {
+                self.status["jobs"] = self.jobs.filter { $0["id"] as? Int != job["id"] as? Int } + [job]
+                self.refreshHistory()
+            } else {
+                self.historyActionError = reply["error"] as? String ?? "Could not process the recording"
+                self.renderHistory()
+            }
+            self.updateIcon()
+        }
+    }
+
+    private func openHistoryResult(_ path: String) {
+        guard isConnected && subscribed && historyInFlight == nil && historyReadError == nil
+                && historyActionError == nil,
+              historyCalls.contains(where: { $0["open_path"] as? String == path }) else { return }
+        if !effects.openURL(URL(fileURLWithPath: path)) {
+            historyActionError = "Could not open the result"
+            renderHistory()
+        }
+    }
+
+    private func actionRequest(_ command: String, _ params: JSON = [:], reply: @escaping (JSON) -> Void = { _ in }) {
         pendingActions.begin()
-        daemon.request(command) { [weak self] response in
+        daemon.request(command, params) { [weak self] response in
             guard let self else { return }
             self.pendingActions.end(success: self.isConnected)
             reply(response)
@@ -378,19 +582,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         } else {
             if isConnected { actionRequest("shutdown") }
         }
+        updateIcon()
     }
 
     @objc private func toggleRecording() {
-        guard !(devWatch?.prepared ?? false), (isRecording || isReady), !recordingRequestPending else { return }
+        guard canToggleRecording else { return }
         let stopping = isRecording
-        recordingRequestPending = true
+        recordingRequest = stopping ? .stop : .start
+        recordingMessage = ""
+        recordingFailed = false
+        updateIcon()
         actionRequest(stopping ? "record_stop" : "record_start") { [weak self] reply in
-            self?.recordingRequestPending = false
-            if let error = reply["error"] as? String {
-                self?.notify(title: "Recording", body: error)
+            guard let self else { return }
+            self.recordingRequest = nil
+            if reply["ok"] as? Bool != true {
+                self.recordingMessage = reply["error"] as? String ?? "Recording request failed"
+                self.recordingFailed = true
+                self.notify(title: "Recording", body: self.recordingMessage)
             } else if stopping, let path = reply["path"] as? String {
-                self?.notify(title: "Recording saved", body: path)
+                self.recordingMessage = "Recording saved locally.\n\(path)"
+                self.notify(title: "Recording saved", body: path)
             }
+            self.updateIcon()
         }
     }
 
@@ -422,13 +635,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     @objc private func openJob(_ sender: NSMenuItem) {
         guard let dir = sender.representedObject as? String else { return }
         let summary = URL(fileURLWithPath: dir).appendingPathComponent("summary.md")
-        NSWorkspace.shared.open(FileManager.default.fileExists(atPath: summary.path) ? summary : URL(fileURLWithPath: dir))
+        _ = effects.openURL(FileManager.default.fileExists(atPath: summary.path) ? summary : URL(fileURLWithPath: dir))
     }
 
     @objc private func openOutput() {
-        let dir = NSString(string: "~/wav2sum/output").expandingTildeInPath
-        try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
-        NSWorkspace.shared.open(URL(fileURLWithPath: dir))
+        guard let dir = status["output_dir"] as? String else {
+            recordingMessage = "Connect to locate the configured output folder."
+            recordingFailed = true
+            updateIcon()
+            return
+        }
+        if !effects.openURL(URL(fileURLWithPath: dir)) {
+            recordingMessage = "Could not open the output folder."
+            recordingFailed = true
+            updateIcon()
+        }
+    }
+
+    @objc private func openMainWindow() {
+        guard setupCompleted else { setupWindow.show(); return }
+        updateIcon()
+        refreshHistory()
+        effects.showMainWindow(mainWindow)
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        openMainWindow()
+        return true
     }
 
     @objc private func openSettings() { setupWindow.show() }

@@ -356,23 +356,13 @@ def test_bootstrap_forces_build_and_preserves_plist_bytes(bootstrap, has_digest)
 
 
 @pytest.mark.parametrize("bootstrap_mode", [False, True])
-def test_install_and_bootstrap_reuse_stage_builder_and_preserve_plist(bootstrap, monkeypatch, bootstrap_mode):
+def test_install_and_bootstrap_preserve_plist_on_rebuild(bootstrap, monkeypatch, bootstrap_mode):
     plist = bootstrap / "Contents/Info.plist"
     original = plist.read_bytes() + b"\n\n"
     plist.write_bytes(original)
-    calls = []
-    stage_builder = build.build_app
-
-    def stage(snapshot, destination, plist_bytes, identity, *, serve):
-        assert destination != bootstrap and not destination.exists()
-        assert plist_bytes == original and identity == "A" * 40
-        calls.append(snapshot)
-        return stage_builder(snapshot, destination, plist_bytes, identity, serve=serve)
-
-    monkeypatch.setattr(build, "build_app", stage)
     install = build.bootstrap_watch_app if bootstrap_mode else build.install_app
     assert install() == bootstrap
-    assert calls == [build.source_snapshot(build.NATIVE_DIR / "app")]
+    assert (bootstrap / "Contents/MacOS/Wav2Sum").read_text() == "new"
     assert plist.read_bytes() == original
     monkeypatch.setattr(build, "_check_no_app_process", lambda: pytest.fail("unchanged app must not be replaced"))
     assert build.install_app() == bootstrap  # The signed resource, not the preserved version field, is authoritative.

@@ -1,3 +1,6 @@
+import shutil
+import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -28,3 +31,25 @@ def socket_path(monkeypatch):
         path = Path(folder) / "d.sock"
         monkeypatch.setattr(client, "SOCKET_PATH", path)
         yield path
+
+
+@pytest.fixture(scope="session")
+def devwatch_binary(tmp_path_factory):
+    if sys.platform != "darwin" or shutil.which("swiftc") is None:
+        pytest.skip("Swift on macOS required")
+    root = Path(__file__).resolve().parents[1]
+    binary = tmp_path_factory.mktemp("devwatch") / "handoff"
+    subprocess.run(
+        [
+            "swiftc",
+            "-parse-as-library",
+            str(root / "wav2sum/native/app/DevWatch.swift"),
+            str(root / "tests/native_devwatch.swift"),
+            "-o",
+            str(binary),
+        ],
+        check=True,
+        capture_output=True,
+        timeout=60,
+    )
+    return binary

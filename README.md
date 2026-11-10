@@ -11,8 +11,9 @@ Move it to Applications and launch it. Python, Swift capture helpers, compatible
 are bundled; recipients do not need Git, uv, Homebrew or Xcode. ASR/cleanup/diarization weights are not bundled;
 the small Silero VAD resource comes with its runtime package. Ordinary builds contain no credentials;
 an explicitly prepared private beta can include dedicated cloud keys (see the build instructions below).
-This is an internal, non-notarized build: verify its origin and follow macOS's own approval UI if Gatekeeper
-refuses it. Do not disable Gatekeeper. Developer ID/notarization remains a separate distribution prerequisite.
+This is an internal, non-notarized build: verify its origin before opening it. If macOS blocks it, use
+System Settings → Privacy & Security → **Open Anyway** for this app, and confirm only if you trust the sender.
+Do not disable Gatekeeper. Developer ID/notarization remains a separate distribution prerequisite.
 The builder derives the minimum macOS version from its bundled binaries; the installed MLX runtime currently
 requires macOS 26.2. Apple Silicon alone does not prove compatibility with an older macOS.
 
@@ -29,8 +30,28 @@ The first-run Settings window starts no daemon until you apply an explicit mode:
 - Automatic completed-call processing is **off by default**. Local automation transcribes only; cloud automation
   requires a separate consent to automatic uploads and produces transcripts/summaries.
 
-Reopen **Settings…** from the menu bar. Mode/model changes are refused during recording, dictation, model loading
-or queued/running processing. Accepted changes coordinate an idle daemon restart; no process is forcibly killed.
+After Apply, the main window opens with a recording/dictation sidebar and a side-by-side history/detail workspace.
+**Start Call Recording** has a timer and Local/Cloud status. **Stop Recording** saves the audio;
+processing follows the explicit automatic-processing setting.
+Recording errors and the saved path stay in the window even when notifications are disabled. After a disconnect,
+recording status is unknown until the app reconnects; another recording cannot be started from stale state.
+Use **Open wav2sum** in the menu bar to reopen a closed window. Normal launches show it after completed setup;
+dev-watch handoffs do not bring it forward automatically.
+
+The **Calls** and **Dictations** tabs show read-only history from the connected background process.
+Select a raw call and press **Process Recording** to queue it explicitly; in Cloud the button is labelled
+**Process Recording (Cloud)** and uses the already consented provider mode. Queued/running recordings cannot be
+submitted again. **Open Result** opens the saved summary or transcript using the actual configured output path.
+Dictations show final/raw text, time and mode; the existing limit of 500 recent entries and seven-day retention
+are unchanged. There is no delete action in this window. **Refresh** rereads local files; job, recording,
+dictation and retention events refresh the list automatically. Read failures are shown, not presented as empty history.
+**⌘R** refreshes history in the main window.
+The dictation pane also reports starting/listening/processing, microphone/provider errors, clipboard fallback and
+permission status. Permissions still require explicit actions in Settings; an insertion request is not proof of a successful paste.
+
+Open **Settings…** from the main window or menu bar (**⌘,** in the main window). The grouped form scrolls while
+**Apply** stays visible. Mode/model changes are refused during recording, dictation, model loading or queued/running
+processing. Accepted changes coordinate an idle daemon restart; no process is forcibly killed.
 App choices live in `~/Library/Application Support/wav2sum/app-settings.json`. Only an explicitly chosen app mode
 is remembered; CLI processing still requires `--cloud`. An app `--cloud` launch conflicting with saved local mode
 opens the mode choice rather than silently ignoring the flag or switching an active daemon.
@@ -41,87 +62,6 @@ confirmation. A separate export consent and save panel create a new private JSON
 overwritten. Only raw/target text, language, style, schema version and training consent are exported. There are no
 audio/call files, app/window names, source paths or automatic network uploads. Review for sensitive information
 before manually sharing the file; seven-day history retention does not remove an exported file.
-
-## Development install
-
-```bash
-uv tool install -e .
-wav2sum app
-```
-
-Local dictation cleanup runs in-process on MLX with `mlx-community/gemma-4-E4B-it-qat-4bit`, explicitly prepared
-from Settings and unloaded after idle time. Local calls produce transcripts only: no summary model is loaded.
-
-Dictation uses [Qwen3-ASR 1.7B](https://huggingface.co/Qwen/Qwen3-ASR-1.7B-hf) through native Transformers
-(at least 5.13), pinned to revision `bcd2b5b7f32b480ab5790554cfa8347f246a14f3`. Its weights are about 4.1 GB;
-inference runs locally: FP16 on Apple Silicon/MPS, FP32 on CPU. Call transcription can use a separate on-demand
-Qwen instance with windows up to 20 seconds or Nemotron 3.5 Transcribe 30B IQ4_NL through
-[speech.cpp 0.9.4](https://github.com/nyosegawa/speech.cpp/releases/tag/v0.9.4), with windows up to 50 seconds.
-The Nemotron worker exits after success/error; cache hits do not load it. Backend identity separates call caches.
-Settings preparation installs verified Nemotron assets in `~/.local/share/wav2sum/models`; weights are about 19 GB.
-Explicit `WAV2SUM_SPEECH_BIN` / `WAV2SUM_NEMOTRON_MODEL` overrides and the existing study installation remain usable.
-For local speaker diarization, accept the [pyannote model terms](https://huggingface.co/pyannote/speaker-diarization-community-1)
-yourself, then prepare it with a Hugging Face token. Setup uses the token in memory for that action only. A complete
-pinned prepared snapshot loads without the token; existing HF authentication is also supported. Pyannote telemetry
-is disabled. An unavailable local model never causes cloud fallback.
-
-`wav2sum app` installs the development app and opens its menu icon. Complete Settings on first launch, including
-explicit permission actions. This development bundle still depends on its project environment.
-
-If the app is already installed from this checkout, keep using its existing project environment:
-
-```fish
-uv run --offline --no-sync wav2sum app
-uv run --offline --no-sync wav2sum status
-```
-
-Run these commands from the repository. The app stores the Python interpreter path in its bundle; switching between
-this `.venv` and the global `uv tool` environment rebuilds the app. `status` only reads the background process state.
-Starting the app enables the configured call detection and model warmup, so use `status` when you only need to check it.
-
-### Development watch
-
-`app --watch` is an explicit development-only watcher for `~/Applications/Wav2Sum.app`, not the standalone friend
-bundle. It watches the native app and icon Swift files, builds a signed candidate, and switches only after the current
-hotkey, dictation, insertion probe, correction tracking, and correction acknowledgement have finished. A single edit
-can take about 210 seconds to locate and follow; further dictations or an unconfirmed correction can extend the wait
-indefinitely. A brief hotkey gap remains. The watcher does not stop or restart
-an existing daemon, recording, or job; Settings and the background-process menu retain their explicit user actions.
-Python daemon changes still require a separate daemon restart.
-
-One-time bootstrap: finish active work and close all Wav2Sum app instances, including standalone copies. Their normal
-Quit action requests daemon shutdown; choose an idle time. Build the development bundle from this checkout without
-starting the app:
-
-```fish
-uv run --offline --no-sync python -c 'from wav2sum.build import bootstrap_watch_app; print(bootstrap_watch_app())'
-```
-
-The watcher requires the named signing identity `wav2sum` (or `WAV2SUM_SIGNING_IDENTITY`) to match the installed
-bundle; ad-hoc or mismatched signatures and standalone targets are refused before bootstrap replaces anything. The
-bundle contains a signed source digest to detect stale builds without changing its `Info.plist`. From the same checkout
-and Python environment, start it with:
-
-```fish
-uv run --offline --no-sync wav2sum app --watch --cloud
-```
-
-Use `--cloud` only for the explicitly chosen cloud mode; omit it for local. Keep that terminal open and do not launch
-another Wav2Sum app or installer in parallel. If the daemon is off, choose **Turn On Background Process** explicitly.
-**Warning:** starting a daemon applies the seven-day deletion policy to existing dictation history. Ctrl-C waits for
-current dictation and corrections, then closes only the owned dev app; the daemon keeps running. An in-flight control
-reply is consumed before stopping. Start the same command to open a new dev session. A second Ctrl-C, or interruption
-after an exit/swap has begun, can require manual recovery.
-Normal app **Quit**, unlike the watcher's app-only exit, still requests daemon shutdown.
-
-The ordinary installer and watcher share one snapshot/build/sign pipeline. Editor saves after a candidate is accepted
-for handoff are queued for the next build; they do not roll back that verified candidate. Failed builds retry with
-increasing delay and retain only the latest attempt from this session. Successful handoff removes its owned scratch
-and previous bundle after the new child's protocol acknowledgement. If a swap or launch outcome is uncertain, the
-watcher stops without forcing a process or repeating the exchange and retains its bundles for manual recovery.
-It never cleans pre-existing directories; old artifacts from earlier versions and explicit installer/bootstrap
-backups still need manual removal. The watcher's signed source digest frames filenames and file boundaries, while
-`Info.plist` remains unchanged.
 
 ## Local and cloud modes
 
@@ -211,11 +151,12 @@ The selected mode is visible in TUI and the menu bar menu; `wav2sum status` repo
 - **Dictate in English.** Hold ⌃ + right ⌥ and speak Russian or English; clean English text is pasted at the cursor.
   If the selected LLM fails, nothing is pasted and you hear a beep.
 - **Calls.** Recording starts by itself when Zoom, Teams, or Webex takes the microphone and stops once the call ends.
-  To record anything else, choose "Record Call" in the menu bar, then "Stop Recording". Recordings are saved
-  automatically. By default, stopping a recording or starting the background process does not enqueue processing;
+  To record anything else, use **Start Call Recording** in the main window (or menu bar), then **Stop Recording**.
+  Recordings are saved automatically. By default, stopping a recording or starting the background process does not enqueue processing;
   the explicit automatic-processing setting applies only after a successful stop, never retrospectively at startup.
-  Otherwise run `wav2sum tui` (or `wav2sum tui --cloud`), select a raw recording in Calls and press `p`.
-  Local mode creates a transcript and metadata; cloud mode also creates summary/chapters. Results appear in `~/wav2sum/output/`.
+  Otherwise select the raw call in the main window and press **Process Recording**, or use
+  `wav2sum tui` (with `--cloud` when selected), select the raw call and press `p`.
+  Local mode creates a transcript and metadata; cloud also creates summary/chapters. Results use the configured output directory.
   Cloud summary points cite source utterances, for example `[U2 00:01–00:02]`; fabricated, hidden or missing
   references are rejected. Long monologues are split without inventing finer timestamps, and reduction keeps
   source references within the context limit. A valid citation proves source identity, not semantic entailment.
@@ -283,41 +224,104 @@ deduplicated, and bounded to 50 terms / 500 UTF-8 bytes, explicit dictionary fir
 unsupported replacement of a sound-alike word. Newline/control-containing terms are excluded.
 Mixed Cyrillic/Latin tokens can use a supplied spelling only when exact transliteration matches it
 (`Немotron` → `Nemotron`); unrelated sound-alikes are not guessed and no correction is learned from this operation.
-Cleanup uses temperature zero and checks numeric facts, currency–amount associations, negations, distinctive
-identifiers, snippet markers and substantial omissions. Narrow explicit self-corrections may remove an earlier
-value; other suspicious edits fall back conservatively. These checks cannot verify arbitrary semantic changes or
-unknown lowercase names. Translation and voice commands have different contracts and do not use this cleanup guard.
-Checks permit narrow Russian inflection repair after a negation without moving it to another lexical stem.
-They do not guarantee correct recognition or repair of every grammatical error already present in ASR text.
 
-`uv run python -m wav2sum.latency` still reads the existing history only. Entries may include `preview`
-(first local or historical cloud preview observed since first received audio), `finalize` (server final request
-through ready, including any in-flight local preview), and cloud `audio_sent` / `audio_received` seconds inside
-the existing `timings` object. Successful cloud requests store final submitted-audio totals, not provider billing
-or acknowledgement of each live chunk. The report separates local/cloud p50/p95 and the submitted/received audio
-ratio; historical WebSocket and after-release batch entries remain in cloud aggregates, so these are not a baseline
-for the current upload path. `asr_live` is local work accumulated during speech,
-not extra post-release delay or cloud inference time. The native app logs
-`dictation ready after … ms` from release handling to the final callback. `app.log` also records
-`dictation insertion session=… ready_ms=… sent_ms=… observed_ms=lower..upper`: monotonic event-tap release
-through exact AX verification of the original field after replacing its UTF-16 selection. Read-only checks run
-every 25 ms for at most two seconds after paste submission; the interval reflects observation uncertainty,
-not a guaranteed 25 ms error bound. Missing AX data, unchanged values or a mismatch/timeout are explicitly
-unavailable/unconfirmed, not successful insertions. No field text is logged by the probe; clipboard-only results
-have no insertion measurement. This verifies the field value, not screen-paint timing or provider billing.
-No existing result, recording, history or vocabulary file is migrated or deleted. Existing caches are re-used only
-for the same transcription backend and parameters; changing mode cannot re-use another provider's transcript.
-`uv run python -m wav2sum.factcheck --cloud [call folder ...]` explicitly sends the selected transcripts to OpenAI
-for a fresh fact-check report; without `--cloud` it refuses before reading calls.
+## Development
 
-## Keeping permissions across updates
+### Checkout environment
+
+```fish
+uv tool install -e .
+wav2sum app
+```
+
+Local dictation cleanup runs in-process on MLX with `mlx-community/gemma-4-E4B-it-qat-4bit`, explicitly prepared
+from Settings and unloaded after idle time. Local calls produce transcripts only: no summary model is loaded.
+
+Dictation uses [Qwen3-ASR 1.7B](https://huggingface.co/Qwen/Qwen3-ASR-1.7B-hf) through native Transformers
+(at least 5.13), pinned to revision `bcd2b5b7f32b480ab5790554cfa8347f246a14f3`. Its weights are about 4.1 GB;
+inference runs locally: FP16 on Apple Silicon/MPS, FP32 on CPU. Call transcription can use a separate on-demand
+Qwen instance with windows up to 20 seconds or Nemotron 3.5 Transcribe 30B IQ4_NL through
+[speech.cpp 0.9.4](https://github.com/nyosegawa/speech.cpp/releases/tag/v0.9.4), with windows up to 50 seconds.
+The Nemotron worker exits after success/error; cache hits do not load it. Backend identity separates call caches.
+Settings preparation installs verified Nemotron assets in `~/.local/share/wav2sum/models`; weights are about 19 GB.
+Explicit `WAV2SUM_SPEECH_BIN` / `WAV2SUM_NEMOTRON_MODEL` overrides and the existing study installation remain usable.
+For local speaker diarization, accept the [pyannote model terms](https://huggingface.co/pyannote/speaker-diarization-community-1)
+yourself, then prepare it with a Hugging Face token. Setup uses the token in memory for that action only. A complete
+pinned prepared snapshot loads without the token; existing HF authentication is also supported. Pyannote telemetry
+is disabled. An unavailable local model never causes cloud fallback.
+
+`wav2sum app` installs the development app and opens its menu icon. Complete Settings on first launch, including
+explicit permission actions. This development bundle still depends on its project environment.
+
+If the app is already installed from this checkout, keep using its existing project environment:
+
+```fish
+uv run --offline --no-sync wav2sum app
+uv run --offline --no-sync wav2sum status
+```
+
+Run these commands from the repository. The app stores the Python interpreter path in its bundle; switching between
+this `.venv` and the global `uv tool` environment rebuilds the app. `status` only reads the background process state.
+Starting the app enables the configured call detection and model warmup, so use `status` when you only need to check it.
+
+### Development watch
+
+`app --watch` is an explicit development-only watcher for `~/Applications/Wav2Sum.app`, not the standalone friend
+bundle. It watches the native app and icon Swift files, builds a signed candidate, and switches only after the current
+hotkey, dictation, insertion probe, correction tracking, and correction acknowledgement have finished. A single edit
+can take about 210 seconds to locate and follow; further dictations or an unconfirmed correction can extend the wait
+indefinitely. A brief hotkey gap remains. The watcher does not stop or restart
+an existing daemon, recording, or job; Settings and the background-process menu retain their explicit user actions.
+Python daemon changes still require a separate daemon restart.
+
+One-time bootstrap: finish active work and close all Wav2Sum app instances, including standalone copies. Their normal
+Quit action requests daemon shutdown; choose an idle time. Build the development bundle from this checkout without
+starting the app:
+
+```fish
+uv run --offline --no-sync python -c 'from wav2sum.build import bootstrap_watch_app; print(bootstrap_watch_app())'
+```
+
+The watcher requires the named signing identity `wav2sum` (or `WAV2SUM_SIGNING_IDENTITY`) to match the installed
+bundle; ad-hoc or mismatched signatures and standalone targets are refused before bootstrap replaces anything. The
+bundle contains a signed source digest to detect stale builds without changing its `Info.plist`. From the same checkout
+and Python environment, start it with:
+
+```fish
+uv run --offline --no-sync wav2sum app --watch --cloud
+```
+
+Use `--cloud` only for the explicitly chosen cloud mode; omit it for local. Keep that terminal open and do not launch
+another Wav2Sum app or installer in parallel. If the daemon is off, choose **Turn On Background Process** explicitly.
+**Warning:** starting a daemon applies the seven-day deletion policy to existing dictation history. Ctrl-C waits for
+current dictation and corrections, then closes only the owned dev app; the daemon keeps running. An in-flight control
+reply is consumed before stopping. Start the same command to open a new dev session. A second Ctrl-C, or interruption
+after an exit/swap has begun, can require manual recovery.
+Normal app **Quit**, unlike the watcher's app-only exit, still requests daemon shutdown.
+
+The ordinary installer and watcher share one snapshot/build/sign pipeline. Editor saves after a candidate is accepted
+for handoff are queued for the next build; they do not roll back that verified candidate. Failed builds retry with
+increasing delay and retain only the latest attempt from this session. Successful handoff removes its owned scratch
+and previous bundle after the new child's protocol acknowledgement. If a swap or launch outcome is uncertain, the
+watcher stops without forcing a process or repeating the exchange and retains its bundles for manual recovery.
+It never cleans pre-existing directories; old artifacts from earlier versions and explicit installer/bootstrap
+backups still need manual removal. The watcher's signed source digest frames filenames and file boundaries, while
+`Info.plist` remains unchanged.
+
+### Checks
+
+```fish
+uv run pytest --cov && uv run ruff check && uv run ruff format --check
+```
+
+### Keeping permissions across updates
 
 macOS ties privacy permissions to the app's signature. By default the app is signed ad hoc, so every rebuild after an
 update asks for them again. To keep them, create a signing certificate once: Keychain Access → Certificate Assistant →
 Create a Certificate…, name `wav2sum`, identity type Self-Signed Root, certificate type Code Signing. Then run
 `wav2sum app` and grant the permissions one last time.
 
-## Building an internal standalone app
+### Building an internal standalone app
 
 From the locked project environment on an Apple Silicon Mac with Xcode command-line tools:
 
@@ -338,7 +342,7 @@ Before creating the image, it moves the bundle, launches the embedded interprete
 checks imports and helper resolution, and decodes a synthetic WAV with bundled FFmpeg and TorchCodec.
 The recipient's declared minimum OS is audited from the actual Mach-O dependencies.
 
-### Private beta with preconfigured Cloud
+#### Private beta with preconfigured Cloud
 
 The owner can explicitly build a private app with dedicated friend keys:
 
@@ -361,7 +365,13 @@ Local mode and automatic-upload consent rules are unchanged. Revoking the dedica
 future use; issuing replacements requires a new private build or entering own keys in Settings.
 
 
-## Local model measurements
+### Local measurements
+
+`python -m wav2sum.latency` reads personal dictation history; it is not a synthetic benchmark.
+Metric definitions and insertion-probe limits are in [ARCHITECTURE](ARCHITECTURE.md#метрики-и-исследовательские-инструменты).
+`python -m wav2sum.factcheck --cloud [call folder ...]` sends transcript text to OpenAI for a new report;
+without `--cloud` it refuses before reading calls. Authorize the selected real calls separately.
+The model runner below performs actual local inference; it does not measure the full app or API latency.
 
 ```fish
 uv run --offline --no-sync python -m wav2sum.model_benchmark --call-model qwen
@@ -406,19 +416,18 @@ These short TTS checks do not establish long-call quality or safety on friends' 
 on their actual configurations before treating a profile as validated. Older recorded cleanup WER against a
 spoken reference is lexical distance, not a semantic cleanup-quality score.
 
-## Development
+### Research-only Core ML converter
 
-```bash
-uv run pytest --cov && uv run ruff check && uv run ruff format --check
-```
+The retained GigaAM encoder converter writes
+`~/Library/Application Support/wav2sum/gigaam-encoder.mlpackage` (clip lengths `s5`, `s10`, `s20`)
+and compares it with Torch using local recordings. It is not used by the current Qwen/Nemotron app.
+Run it only when explicitly investigating that converter, not as a routine verification command.
 
-To try the GigaAM encoder on the Neural Engine (CHU-97), convert it to Core ML. The script saves
-`~/Library/Application Support/wav2sum/gigaam-encoder.mlpackage` (one function per clip length: `s5`, `s10`, `s20`)
-and prints how close it is to torch on clips from your recordings. The app does not use the package yet.
-
-```bash
+```fish
 uv run --group coreml python -m wav2sum.coreml
 ```
+
+### Dictation phrase set
 
 To check a change to dictation (audio, VAD, ASR, cleanup) on your own voice, read the 46 phrases of
 `wav2sum/evalset.py` once in each of four conditions: `quiet` (a quiet room), `airpods` (connect AirPods first: the
@@ -427,7 +436,7 @@ Enter starts and stops each phrase, and phrases already recorded are skipped, so
 in `~/wav2sum/evalset/<condition>/`. The measurement only reads the recordings and prints WER and correctly written
 terms per condition, for the raw ASR and after the LLM cleanup.
 
-```bash
+```fish
 uv run python -m wav2sum.evalset record quiet
 uv run python -m wav2sum.evalset
 ```

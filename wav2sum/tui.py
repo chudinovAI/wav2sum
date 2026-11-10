@@ -1,5 +1,4 @@
 import asyncio
-import json
 import re
 import subprocess
 import sys
@@ -14,6 +13,7 @@ from textual.containers import Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Input, Markdown, Static
 
+from wav2sum.catalog import list_calls
 from wav2sum.client import DaemonClient, DaemonError, DaemonUnavailable
 from wav2sum.config import LOG_PATH, Config
 from wav2sum.history import CAN_TRASH, delete_call, delete_dictation, load_dictations
@@ -145,17 +145,13 @@ class Wav2SumTUI(App):
         selected = None
         if table.row_count:
             selected = table.coordinate_to_cell_key(table.cursor_coordinate).row_key.value
-        folders = [d for d in self.cfg.output_dir.glob("*") if (d / "meta.json").exists()]
-        results = [(folder, json.loads((folder / "meta.json").read_text(encoding="utf-8"))) for folder in folders]
-        processed = {str(Path(meta["audio"]).resolve()): str(folder) for folder, meta in results if meta.get("audio")}
-        entries = [(folder, meta) for folder, meta in results]
-        entries.extend(
-            (audio, None) for audio in self.cfg.recordings_dir.glob("*.wav") if str(audio.resolve()) not in processed
-        )
+        entries = list_calls(self.cfg.recordings_dir, self.cfg.output_dir)
+        processed = {str(entry.audio): str(entry.path) for entry in entries if entry.meta is not None and entry.audio}
         table.clear()
         self.raw_calls = set()
         visible_keys = set()
-        for path, meta in sorted(entries, key=lambda entry: entry[0].stat().st_mtime, reverse=True):
+        for entry in entries:
+            path, meta = entry.path, entry.meta
             if meta is None:
                 if self.search_text and self.search_text not in path.name.lower():
                     continue

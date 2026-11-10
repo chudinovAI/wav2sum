@@ -5,7 +5,8 @@ struct HUDTest {
     static func main() {
         _ = NSApplication.shared
         guard let screen = NSScreen.main ?? NSScreen.screens.first else {
-            fatalError("No screen available for HUD test")
+            print("HUD test requires a graphical macOS session")
+            exit(77)
         }
         let hud = HUD()
         hud.cloud = true
