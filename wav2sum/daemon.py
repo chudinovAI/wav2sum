@@ -2,6 +2,7 @@ import asyncio
 import base64
 import ctypes
 import functools
+import hashlib
 import itertools
 import json
 import logging
@@ -19,6 +20,7 @@ from wav2sum.audio import pcm16_to_float
 from wav2sum.autorecord import CallDetector, watch_inputs
 from wav2sum.calls import Names, Speakers, process, summarize_existing
 from wav2sum.capture import CallRecorder, CaptureError, Level, new_recording_path
+from wav2sum.catalog import list_calls
 from wav2sum.cloud import OpenAILLM
 from wav2sum.config import (
     EDITS_PATH,
@@ -193,6 +195,8 @@ class Daemon:
             case "subscribe":
                 self.subscribers.add(writer)
                 return self.status()
+            case "history":
+                return await self._history()
             case "dictate_audio":
                 return self._dictate_audio(request, writer)
             case "dictate_cancel":
@@ -204,9 +208,7 @@ class Daemon:
             case "record_start":
                 return await self._record_start()
             case "record_stop":
-                if self.calls and self.calls.app:
-                    self.calls.dismiss()
-                return await self._record_stop()
+                return await self._record_stop(manual=True)
             case "process":
                 return {"job": asdict(self._enqueue(Path(request["path"]).expanduser()))}
             case "summarize_last_meeting":
@@ -256,12 +258,19 @@ class Daemon:
     def _check_mode(self, request: dict) -> None:
         if self.reconfiguring:
             raise ValueError("Settings are changing; reconnect after the background process restarts")
-        if request.get("cmd") not in {"subscribe", "dictate_audio", "dictate", "process", "summarize_last_meeting"}:
+        if request.get("cmd") not in {
+            "subscribe",
+            "history",
+            "dictate_audio",
+            "dictate",
+            "process",
+            "summarize_last_meeting",
+        }:
             return
         requested_cloud = request.get("cloud", False)
         if not isinstance(requested_cloud, bool) or requested_cloud != self.cfg.cloud:
             raise ValueError("daemon mode mismatch: reconnect using the matching local or cloud mode")
-        if self.cfg.cloud and request["cmd"] not in {"subscribe", "summarize_last_meeting"}:
+        if self.cfg.cloud and request["cmd"] not in {"subscribe", "history", "summarize_last_meeting"}:
             self.models.dictation_asr.validate_credentials()
             self.dictator.llm.validate_credentials()
 
@@ -277,6 +286,8 @@ class Daemon:
             "llm_memory_mb": llm_mb,
             "hotkey": self.cfg.dictation.hotkey,
             "auto_process": self.cfg.auto_process and (not self.cfg.cloud or self.cfg.auto_cloud_consent),
+            "recordings_dir": str(self.cfg.recordings_dir.expanduser().absolute()),
+            "output_dir": str(self.cfg.output_dir.expanduser().absolute()),
             "call_model": self.cfg.call_model,
             "error": self.warm_up_error,
             "recording": {"path": str(self.recorder.path), "seconds": self.recorder.seconds, "auto": self.auto_app}
@@ -284,6 +295,59 @@ class Daemon:
             else None,
             "jobs": [asdict(j) for j in self.jobs[-20:]],
         }
+
+    async def _history(self) -> dict:
+        calls, dictations = await asyncio.to_thread(self._read_history)
+        jobs = {str(Path(job.audio).resolve()): job for job in self.jobs}
+        active = str(self.recorder.path.resolve()) if self.recorder else None
+        for call in calls:
+            if job := jobs.get(call["audio"]):
+                call.update(state=job.state, stage=job.stage, error=job.error)
+            if active is not None and call["audio"] == active:
+                call.update(state="recording", stage="", error=None)
+        return {
+            "calls": calls,
+            "dictations": dictations,
+            "recordings_dir": str(self.cfg.recordings_dir.expanduser().absolute()),
+            "output_dir": str(self.cfg.output_dir.expanduser().absolute()),
+        }
+
+    def _read_history(self) -> tuple[list[dict], list[dict]]:
+        calls = []
+        for entry in list_calls(self.cfg.recordings_dir, self.cfg.output_dir):
+            folder = entry.path if entry.meta is not None else None
+            transcript = folder / "transcript.txt" if folder else None
+            complete = transcript is not None and transcript.is_file()
+            summary = folder / "summary.md" if folder else None
+            open_path = summary if summary and summary.is_file() else transcript if complete else folder
+            meta = entry.meta or {}
+            calls.append(
+                {
+                    "id": str(entry.path.absolute()),
+                    "path": str(entry.path.absolute()),
+                    "title": (entry.path.name if folder else entry.path.stem).removeprefix("call-"),
+                    "audio": str(entry.audio) if entry.audio else None,
+                    "out_dir": str(folder.absolute()) if folder else None,
+                    "open_path": str(open_path.absolute()) if open_path else None,
+                    "state": "done" if complete else "failed" if folder else "raw",
+                    "stage": "",
+                    "error": "Incomplete output: transcript.txt is missing" if folder and not complete else None,
+                    "duration_sec": meta.get("duration_sec"),
+                    "speakers": meta.get("speakers", []),
+                }
+            )
+        dictations = []
+        occurrences: dict[str, int] = {}
+        for entry in load_dictations(HISTORY_PATH):
+            item = {key: entry.get(key, "") for key in ("time", "text", "raw")}
+            item["mode"] = (
+                "command" if entry.get("command") else "translate" if entry.get("translate") else entry.get("style", "")
+            )
+            digest = hashlib.sha256(json.dumps(item, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+            ordinal = occurrences.get(digest, 0)
+            occurrences[digest] = ordinal + 1
+            dictations.append({"id": f"{digest}:{ordinal}", **item})
+        return calls, dictations
 
     def _dictate_audio(self, request: dict, writer: asyncio.StreamWriter) -> dict:
         if self.warm_up_error:
@@ -444,7 +508,9 @@ class Daemon:
         self._broadcast({"event": "recording", "active": True, "path": str(recorder.path), "auto": auto})
         return {"path": str(recorder.path)}
 
-    async def _record_stop(self) -> dict:
+    async def _record_stop(self, *, manual: bool = False) -> dict:
+        if manual and self.calls and self.calls.app:
+            self.calls.dismiss()
         async with self.recording_lock:
             if not self.recorder:
                 raise RuntimeError("not recording")

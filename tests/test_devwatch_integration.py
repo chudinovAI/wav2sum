@@ -1,10 +1,8 @@
 """Watcher integration with a synthetic Swift child and no app or daemon."""
 
-import shutil
 import signal
 import subprocess
 import sys
-from pathlib import Path
 
 import pytest
 
@@ -12,24 +10,7 @@ from wav2sum.devwatch import Watcher
 from wav2sum.devwatch_runtime import RuntimeChild
 
 
-@pytest.mark.skipif(sys.platform != "darwin" or shutil.which("swiftc") is None, reason="Swift on macOS required")
-def test_watcher_switches_and_restarts_through_cli_with_owned_swift_children(tmp_path, monkeypatch):
-    root = Path(__file__).resolve().parents[1]
-    binary = tmp_path / "handoff"
-    subprocess.run(
-        [
-            "swiftc",
-            "-parse-as-library",
-            str(root / "wav2sum/native/app/DevWatch.swift"),
-            str(root / "tests/native_devwatch.swift"),
-            "-o",
-            str(binary),
-        ],
-        check=True,
-        capture_output=True,
-        timeout=60,
-    )
-
+def test_watcher_switches_and_restarts_through_cli_with_owned_swift_children(tmp_path, monkeypatch, devwatch_binary):
     class SyntheticAdapter:
         def __init__(self):
             self.source = "old"
@@ -57,7 +38,10 @@ def test_watcher_switches_and_restarts_through_cli_with_owned_swift_children(tmp
 
         def launch(self, *, cloud):
             process = subprocess.Popen(
-                [str(binary), "--pipe-child"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, start_new_session=True
+                [str(devwatch_binary), "--pipe-child"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                start_new_session=True,
             )
             self.children.append(process)
             return RuntimeChild(process)

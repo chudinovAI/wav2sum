@@ -145,7 +145,7 @@ def test_summary_model_is_cloud_only():
     assert cloud.summary_llm.model == cfg.summary_model
 
 
-@pytest.mark.parametrize("cmd", ["subscribe", "dictate_audio", "dictate", "process"])
+@pytest.mark.parametrize("cmd", ["subscribe", "history", "dictate_audio", "dictate", "process"])
 @pytest.mark.parametrize("cloud", [False, True])
 def test_sensitive_mode_mismatch_rejected_before_processing(tmp_path, monkeypatch, cmd, cloud):
     async def scenario():

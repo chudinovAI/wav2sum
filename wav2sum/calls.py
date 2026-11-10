@@ -152,9 +152,7 @@ def process(
     if models.cloud and llm:
         on_stage("Summarizing")
         started = time.monotonic()
-        summary = summarize(format_transcript(conversation), llm, terms, language)
-        if chapter_lines := chapters(format_transcript(conversation), llm, language):
-            summary += "\n\n" + chapter_lines
+        summary = _summary(format_transcript(conversation), llm, terms, language)
         timings["summarization"] = time.monotonic() - started
 
     duration = len(audio) / SAMPLE_RATE
@@ -187,9 +185,7 @@ def summarize_existing(
     vocabulary = vocabulary or Vocabulary()
     terms = recognition_terms(dictionary, vocabulary.words)
     on_stage("Summarizing")
-    summary = summarize(transcript, llm, terms, language)
-    if chapter_lines := chapters(transcript, llm, language):
-        summary += "\n\n" + chapter_lines
+    summary = _summary(transcript, llm, terms, language)
     with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=folder, prefix=".summary-") as temporary:
         temporary.write(summary)
         temporary.flush()
@@ -200,6 +196,13 @@ def summarize_existing(
             if not target.is_file():
                 raise ValueError("Summary output already exists and is not a file") from None
     return folder
+
+
+def _summary(transcript: str, llm: LLM | OpenAILLM, terms: Sequence[str], language: str) -> str:
+    summary = summarize(transcript, llm, terms, language)
+    if chapter_lines := chapters(transcript, llm, language):
+        summary += "\n\n" + chapter_lines
+    return summary
 
 
 def transcribe(

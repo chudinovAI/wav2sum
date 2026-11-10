@@ -2,6 +2,10 @@ import AppKit
 import AVFoundation
 import UserNotifications
 
+private final class SettingsForm: NSStackView {
+    override var isFlipped: Bool { true }
+}
+
 final class SetupWindow: NSObject {
     var onApplying: ((Bool) -> Bool)?
     var onApplied: ((JSON, Bool) -> Void)?
@@ -28,83 +32,177 @@ final class SetupWindow: NSObject {
     private let permissionStatus = NSTextField(wrappingLabelWithString: "")
     private let permissions: () -> String
 
-    init(initialCloud: Bool, permissions: @escaping () -> String = {
+    static func permissionSummary() -> String {
         let microphone = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized ? "allowed" : "not granted"
         let input = CGPreflightListenEventAccess() ? "allowed" : "not granted"
         let paste = AXIsProcessTrusted() ? "allowed" : "not granted"
         return "Microphone: \(microphone) · Input Monitoring: \(input) · Accessibility: \(paste). System audio access is checked when recording starts."
-    }) {
+    }
+
+    init(initialCloud: Bool, permissions: @escaping () -> String = SetupWindow.permissionSummary) {
         self.initialCloud = initialCloud
         self.permissions = permissions
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 660, height: 740), styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 740, height: 740), styleMask: [.titled, .closable, .resizable, .miniaturizable], backing: .buffered, defer: false)
         super.init()
         window.title = "wav2sum Settings"
         window.isReleasedWhenClosed = false
-        let stack = NSStackView()
+        window.contentMinSize = NSSize(width: 680, height: 580)
+        window.autorecalculatesKeyViewLoop = true
+
+        let scroll = NSScrollView()
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        scroll.hasVerticalScroller = true
+        scroll.drawsBackground = false
+        scroll.identifier = NSUserInterfaceItemIdentifier("settings.form")
+
+        let stack = SettingsForm()
         stack.orientation = .vertical
         stack.alignment = .leading
-        stack.spacing = 8
-        stack.edgeInsets = NSEdgeInsets(top: 18, left: 20, bottom: 18, right: 20)
-        let scroll = NSScrollView(frame: window.contentView!.bounds)
-        scroll.autoresizingMask = [.width, .height]
-        scroll.hasVerticalScroller = true
-        window.contentView?.addSubview(scroll)
-        scroll.documentView = stack
+        stack.spacing = 24
+        stack.edgeInsets = NSEdgeInsets(top: 24, left: 24, bottom: 24, right: 24)
         stack.translatesAutoresizingMaskIntoConstraints = false
+        scroll.documentView = stack
         let clip = scroll.contentView
         NSLayoutConstraint.activate([
             stack.widthAnchor.constraint(equalTo: clip.widthAnchor),
             stack.heightAnchor.constraint(greaterThanOrEqualTo: clip.heightAnchor)
         ])
-        func label(_ text: String) -> NSTextField { NSTextField(wrappingLabelWithString: text) }
-        func add(_ view: NSView) { stack.addArrangedSubview(view); view.widthAnchor.constraint(lessThanOrEqualTo: stack.widthAnchor, constant: -40).isActive = true }
-        func button(_ title: String, _ action: Selector) -> NSButton { NSButton(title: title, target: self, action: action) }
-        add(label("Choose where audio and text are processed. Local mode never creates summaries. Cloud sends audio to Deepgram and text to OpenAI; provider charges may apply. No cloud fallback occurs."))
-        mode.addItems(withTitles: ["Local", "Cloud"])
-        mode.target = self; mode.action = #selector(modeChanged)
-        autoProcess.target = self; autoProcess.action = #selector(automaticChanged)
-        add(mode)
-        add(cloudConsent)
-        add(autoProcess)
-        add(autoConsent)
-        add(label("Automatic local processing produces transcripts only. Automatic cloud processing sends call audio and text to providers and can create summaries."))
-        let localStart = stack.arrangedSubviews.count
-        add(label("Downloads: Qwen about 4.1 GB, cleanup about 6.8 GB; Nemotron adds about 19 GB. Downloads start only when requested."))
-        add(label("Local call model (Qwen is lighter; Nemotron requires substantially more memory):"))
-        callModel.addItems(withTitles: ["Qwen", "Nemotron"])
-        add(callModel)
-        add(unsafeModel)
-        add(label("Local cleanup model (currently supported model):"))
-        cleanupModel.isEditable = false
-        cleanupModel.widthAnchor.constraint(equalToConstant: 500).isActive = true
-        add(cleanupModel)
-        add(detail)
-        hfToken.placeholderString = "Optional Hugging Face token for this download only"
-        hfToken.widthAnchor.constraint(equalToConstant: 450).isActive = true
-        add(hfToken)
-        add(label("Speaker diarization for local calls needs pyannote access. Accept its terms yourself on Hugging Face, then enter a token for preparation. Dictation does not need this token."))
-        add(button("Open pyannote Access / Terms", #selector(openModelTerms)))
-        add(button("Prepare / Download Local Models", #selector(prepare)))
-        localViews = Array(stack.arrangedSubviews[localStart...])
-        let cloudStart = stack.arrangedSubviews.count
-        add(cloudKeysNote)
-        deepgram.placeholderString = "Deepgram API key"
-        openai.placeholderString = "OpenAI API key"
-        for field in [deepgram, openai] { field.widthAnchor.constraint(equalToConstant: 450).isActive = true; add(field) }
-        add(button("Save Cloud Keys", #selector(saveKeys)))
-        cloudViews = Array(stack.arrangedSubviews[cloudStart...])
-        add(label("Permissions are optional until needed. Grant Microphone for dictation, Input Monitoring and Accessibility for the hotkey and paste, and System Audio Recording for calls."))
-        let permissions = NSStackView(views: [button("Microphone", #selector(microphone)), button("Input Monitoring", #selector(inputMonitoring)), button("Accessibility", #selector(accessibility)), button("System Audio Settings", #selector(systemAudio)), button("Notifications", #selector(notifications))])
-        permissions.spacing = 6
-        add(permissions)
-        add(permissionStatus)
+
+        let footer = NSView()
+        footer.translatesAutoresizingMaskIntoConstraints = false
+        footer.identifier = NSUserInterfaceItemIdentifier("settings.footer")
+        result.textColor = .secondaryLabelColor
+        result.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        result.isSelectable = true
+        result.translatesAutoresizingMaskIntoConstraints = false
+        footer.addSubview(result)
         applyButton.target = self
         applyButton.action = #selector(apply)
-        add(applyButton)
-        add(result)
+        applyButton.identifier = NSUserInterfaceItemIdentifier("settings.apply")
+        applyButton.keyEquivalent = "\r"
+        applyButton.translatesAutoresizingMaskIntoConstraints = false
+        footer.addSubview(applyButton)
+
+        let separator = NSBox()
+        separator.boxType = .separator
+        separator.translatesAutoresizingMaskIntoConstraints = false
+        let content = window.contentView!
+        content.addSubview(scroll)
+        content.addSubview(separator)
+        content.addSubview(footer)
+        NSLayoutConstraint.activate([
+            scroll.topAnchor.constraint(equalTo: content.topAnchor),
+            scroll.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            scroll.bottomAnchor.constraint(equalTo: separator.topAnchor),
+            separator.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            separator.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            separator.bottomAnchor.constraint(equalTo: footer.topAnchor),
+            footer.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            footer.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            footer.bottomAnchor.constraint(equalTo: content.bottomAnchor),
+            result.topAnchor.constraint(equalTo: footer.topAnchor, constant: 12),
+            result.leadingAnchor.constraint(equalTo: footer.leadingAnchor, constant: 24),
+            result.trailingAnchor.constraint(equalTo: footer.trailingAnchor, constant: -24),
+            applyButton.topAnchor.constraint(equalTo: result.bottomAnchor, constant: 8),
+            applyButton.trailingAnchor.constraint(equalTo: footer.trailingAnchor, constant: -24),
+            applyButton.bottomAnchor.constraint(equalTo: footer.bottomAnchor, constant: -16)
+        ])
+
+        func label(_ text: String, secondary: Bool = false) -> NSTextField {
+            let field = NSTextField(wrappingLabelWithString: text)
+            if secondary {
+                field.textColor = .secondaryLabelColor
+                field.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+            }
+            return field
+        }
+        func add(_ view: NSView, to section: NSStackView, fill: Bool = false) {
+            section.addArrangedSubview(view)
+            if fill { view.widthAnchor.constraint(equalTo: section.widthAnchor).isActive = true }
+        }
+        func section(_ title: String, identifier: String) -> NSStackView {
+            let section = NSStackView()
+            section.orientation = .vertical
+            section.alignment = .leading
+            section.spacing = 8
+            section.identifier = NSUserInterfaceItemIdentifier(identifier)
+            let heading = label(title)
+            heading.font = .systemFont(ofSize: 15, weight: .semibold)
+            add(heading, to: section)
+            stack.addArrangedSubview(section)
+            section.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -48).isActive = true
+            return section
+        }
+        func button(_ title: String, _ action: Selector) -> NSButton { NSButton(title: title, target: self, action: action) }
+
+        let processing = section("Processing & Automation", identifier: "settings.processing")
+        add(label("Choose where audio and text are processed. Local mode never creates summaries. Cloud sends audio to Deepgram and text to OpenAI; provider charges may apply. No cloud fallback occurs.", secondary: true), to: processing, fill: true)
+        add(label("Processing mode"), to: processing)
+        mode.addItems(withTitles: ["Local", "Cloud"])
+        mode.target = self; mode.action = #selector(modeChanged)
+        mode.setAccessibilityLabel("Processing mode")
+        mode.identifier = NSUserInterfaceItemIdentifier("settings.mode")
+        autoProcess.identifier = NSUserInterfaceItemIdentifier("settings.autoProcess")
+        cloudConsent.identifier = NSUserInterfaceItemIdentifier("settings.cloudConsent")
+        autoConsent.identifier = NSUserInterfaceItemIdentifier("settings.autoConsent")
+        autoProcess.target = self; autoProcess.action = #selector(automaticChanged)
+        add(mode, to: processing)
+        add(cloudConsent, to: processing)
+        add(autoProcess, to: processing)
+        add(autoConsent, to: processing)
+        add(label("Automatic local processing produces transcripts only. Automatic cloud processing sends call audio and text to providers and can create summaries.", secondary: true), to: processing, fill: true)
+
+        let local = section("Local Models", identifier: "settings.localModels")
+        add(label("Downloads: Qwen about 4.1 GB, cleanup about 6.8 GB; Nemotron adds about 19 GB. Downloads start only when requested.", secondary: true), to: local, fill: true)
+        add(label("Local call model (Qwen is lighter; Nemotron requires substantially more memory):"), to: local, fill: true)
+        callModel.addItems(withTitles: ["Qwen", "Nemotron"])
+        callModel.setAccessibilityLabel("Local call model")
+        add(callModel, to: local)
+        add(unsafeModel, to: local)
+        add(label("Local cleanup model (currently supported model):"), to: local, fill: true)
+        cleanupModel.isEditable = false
+        cleanupModel.setAccessibilityLabel("Local cleanup model")
+        add(cleanupModel, to: local, fill: true)
+        detail.textColor = .secondaryLabelColor
+        detail.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        add(detail, to: local, fill: true)
+        hfToken.placeholderString = "Optional Hugging Face token for this download only"
+        hfToken.setAccessibilityLabel("Optional Hugging Face token")
+        add(hfToken, to: local, fill: true)
+        add(label("Speaker diarization for local calls needs pyannote access. Accept its terms yourself on Hugging Face, then enter a token for preparation. Dictation does not need this token.", secondary: true), to: local, fill: true)
+        add(button("Open pyannote Access / Terms", #selector(openModelTerms)), to: local)
+        add(button("Prepare / Download Local Models", #selector(prepare)), to: local)
+        localViews = [local]
+
+        let cloud = section("Cloud Credentials", identifier: "settings.cloudCredentials")
+        cloudKeysNote.textColor = .secondaryLabelColor
+        cloudKeysNote.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        add(cloudKeysNote, to: cloud, fill: true)
+        deepgram.placeholderString = "Deepgram API key"
+        openai.placeholderString = "OpenAI API key"
+        deepgram.setAccessibilityLabel("Deepgram API key")
+        openai.setAccessibilityLabel("OpenAI API key")
+        for field in [deepgram, openai] { add(field, to: cloud, fill: true) }
+        add(button("Save Cloud Keys", #selector(saveKeys)), to: cloud)
+        cloudViews = [cloud]
+
+        let permissionSection = section("Permissions", identifier: "settings.permissions")
+        add(label("Permissions are optional until needed. Grant Microphone for dictation, Input Monitoring and Accessibility for the hotkey and paste, and System Audio Recording for calls.", secondary: true), to: permissionSection, fill: true)
+        let permissionRow = NSStackView(views: [button("Microphone", #selector(microphone)), button("Input Monitoring", #selector(inputMonitoring)), button("Accessibility", #selector(accessibility))])
+        permissionRow.spacing = 6
+        add(permissionRow, to: permissionSection)
+        let additionalPermissionRow = NSStackView(views: [button("System Audio Settings", #selector(systemAudio)), button("Notifications", #selector(notifications))])
+        additionalPermissionRow.spacing = 6
+        add(additionalPermissionRow, to: permissionSection)
+        permissionStatus.textColor = .secondaryLabelColor
+        permissionStatus.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        permissionStatus.setAccessibilityLabel("Permission status")
+        add(permissionStatus, to: permissionSection, fill: true)
         window.center()
         updateModeVisibility()
         updatePermissionStatus()
+        window.initialFirstResponder = mode
     }
 
     func show(requestCloud: Bool = false) {

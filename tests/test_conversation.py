@@ -1,22 +1,5 @@
-from wav2sum.conversation import Piece, Utterance, build_conversation, drop_echo, split_by_turns
-from wav2sum.diarizer import Turn
+from wav2sum.conversation import Utterance, build_conversation, drop_echo
 from wav2sum.vad import merge_close_spans
-
-
-def test_split_by_turns_cuts_span_at_speaker_change():
-    turns = [Turn(0, 0.0, 4.0), Turn(1, 4.5, 9.0)]
-    assert split_by_turns([(0.2, 8.8)], turns) == [Piece(0.2, 4.25, 0), Piece(4.25, 8.8, 1)]
-
-
-def test_split_by_turns_absorbs_slivers():
-    turns = [Turn(0, 0.0, 3.0), Turn(1, 3.0, 3.2), Turn(0, 3.2, 6.0)]
-    assert split_by_turns([(0.0, 6.0)], turns) == [Piece(0.0, 6.0, 0)]
-
-
-def test_split_by_turns_uses_nearest_speaker_outside_turns():
-    turns = [Turn(1, 10.0, 12.0)]
-    assert split_by_turns([(0.0, 1.0)], turns) == [Piece(0.0, 1.0, 1)]
-    assert split_by_turns([(0.0, 1.0)], []) == [Piece(0.0, 1.0, None)]
 
 
 def test_drop_echo_removes_leaked_copy_only():

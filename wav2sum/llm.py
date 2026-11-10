@@ -167,11 +167,18 @@ def _lookup_generate(model, tokenizer, whole: list, prompt: list, *, cache: list
 
 
 def _draft(tokens: list, size: int) -> list:
+    if size == 0:
+        return []
     for n in (3, 2, 1):
-        tail = tokens[-n:]
-        for i in range(len(tokens) - n - 1, -1, -1):
-            if tokens[i : i + n] == tail:
-                return tokens[i + n : i + n + size]
+        tail = len(tokens) - n
+        for i in range(tail - 1, -1, -1):
+            if tokens[i] != tokens[tail]:
+                continue
+            if n > 1 and tokens[i + 1] != tokens[tail + 1]:
+                continue
+            if n > 2 and tokens[i + 2] != tokens[tail + 2]:
+                continue
+            return tokens[i + n : i + n + size]
     return []
 
 

@@ -494,3 +494,23 @@ def test_lookup_leaves_the_saved_prefix_clean(lookup):
 def test_lookup_stops_a_runaway_at_the_limit(lookup):
     with pytest.raises(ValueError):
         lookup(" ".join(["бла"] * 100))
+
+
+@pytest.mark.parametrize(
+    "tokens,size,expected",
+    [
+        ([], 4, []),
+        ([7], 4, []),
+        ([1, 2, 3, 4], 4, []),
+        ([7, 7], 4, [7]),
+        ([1, 2, 1, 2, 1], 4, [2, 1]),
+        ([1, 2, 3, 10, 11, 12, 2, 3, 20, 21, 1, 2, 3], 4, [10, 11, 12, 2]),
+        ([1, 2, 3, 10, 11, 12, 1, 2, 3, 20, 21, 22, 1, 2, 3], 4, [20, 21, 22, 1]),
+        ([8, 9, 4, 5, 6, 7, 9, 3, 4, 8, 9], 4, [4, 5, 6, 7]),
+        ([7, 3, 4, 5, 6, 7], 4, [3, 4, 5, 6]),
+        ([7, 3, 4, 5, 6, 7], 1, [3]),
+        ([7, 3, 4, 5, 6, 7], 0, []),
+    ],
+)
+def test_draft_preserves_suffix_priority_and_boundaries(tokens, size, expected):
+    assert llm_module._draft(tokens, size) == expected

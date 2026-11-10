@@ -11,26 +11,10 @@ from wav2sum.devwatch import MARKER
 from wav2sum.devwatch_runtime import RuntimeChild
 
 
-@pytest.mark.skipif(sys.platform != "darwin" or shutil.which("swiftc") is None, reason="Swift on macOS required")
-def test_real_swift_handoff_over_child_pipes(tmp_path):
-    root = Path(__file__).resolve().parents[1]
-    binary = tmp_path / "handoff"
-    subprocess.run(
-        [
-            "swiftc",
-            "-parse-as-library",
-            str(root / "wav2sum/native/app/DevWatch.swift"),
-            str(root / "tests/native_devwatch.swift"),
-            "-o",
-            str(binary),
-        ],
-        check=True,
-        capture_output=True,
-        timeout=60,
-    )
-    subprocess.run([str(binary)], check=True, capture_output=True, timeout=5)
+def test_real_swift_handoff_over_child_pipes(devwatch_binary):
+    subprocess.run([str(devwatch_binary)], check=True, capture_output=True, timeout=5)
     process = subprocess.Popen(
-        [str(binary), "--pipe-child"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, start_new_session=True
+        [str(devwatch_binary), "--pipe-child"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, start_new_session=True
     )
     child = RuntimeChild(process)
     try:
@@ -48,7 +32,7 @@ def test_real_swift_handoff_over_child_pipes(tmp_path):
             process.wait(timeout=5)
 
     process = subprocess.Popen(
-        [str(binary), "--eof-child"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, start_new_session=True
+        [str(devwatch_binary), "--eof-child"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, start_new_session=True
     )
     child = RuntimeChild(process)
     try:
