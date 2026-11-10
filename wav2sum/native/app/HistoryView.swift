@@ -165,6 +165,13 @@ final class HistoryView: NSView, NSTableViewDataSource, NSTableViewDelegate {
         stack.orientation = .vertical; stack.alignment = .leading; stack.spacing = 8
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
+        // Native control bounds can extend beyond the alignment rects used by NSStackView.
+        let controlInsets = NSEdgeInsets(
+            top: max(kind.alignmentRectInsets.top, refresh.alignmentRectInsets.top),
+            left: max(kind.alignmentRectInsets.left, process.alignmentRectInsets.left),
+            bottom: max(process.alignmentRectInsets.bottom, open.alignmentRectInsets.bottom),
+            right: max(refresh.alignmentRectInsets.right, open.alignmentRectInsets.right)
+        )
         let listMinimum = listPane.widthAnchor.constraint(greaterThanOrEqualToConstant: 220)
         let detailMinimum = details.widthAnchor.constraint(greaterThanOrEqualToConstant: 300)
         listMinimum.priority = .defaultHigh
@@ -172,8 +179,10 @@ final class HistoryView: NSView, NSTableViewDataSource, NSTableViewDelegate {
         let listProportion = listPane.widthAnchor.constraint(equalTo: content.widthAnchor, multiplier: 0.34)
         listProportion.priority = .defaultLow
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor), stack.trailingAnchor.constraint(equalTo: trailingAnchor),
-            stack.topAnchor.constraint(equalTo: topAnchor), stack.bottomAnchor.constraint(equalTo: bottomAnchor),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: controlInsets.left),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -controlInsets.right),
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: controlInsets.top),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -controlInsets.bottom),
             header.widthAnchor.constraint(equalTo: stack.widthAnchor),
             content.widthAnchor.constraint(equalTo: stack.widthAnchor),
             status.widthAnchor.constraint(equalTo: stack.widthAnchor),

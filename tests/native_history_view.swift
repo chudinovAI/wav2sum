@@ -52,8 +52,10 @@ struct HistoryViewTest {
         let listFrame = view.convert(table.enclosingScrollView!.bounds, from: table.enclosingScrollView!)
         let detailFrame = view.convert(detail.enclosingScrollView!.bounds, from: detail.enclosingScrollView!)
         precondition(listFrame.maxX <= detailFrame.minX, "history panes must be side by side")
-        precondition(view.bounds.contains(view.convert(process.bounds, from: process)))
-        precondition(view.bounds.contains(view.convert(refresh.bounds, from: refresh)))
+        precondition(view.bounds.contains(view.convert(process.bounds, from: process)),
+                     "Process bounds \(view.convert(process.bounds, from: process)) must fit history bounds \(view.bounds)")
+        precondition(view.bounds.contains(view.convert(refresh.bounds, from: refresh)),
+                     "Refresh bounds \(view.convert(refresh.bounds, from: refresh)) must fit history bounds \(view.bounds)")
         precondition(detail.string.contains(longError), "the full history error must remain selectable")
         window.setContentSize(NSSize(width: 440, height: 600))
 

@@ -202,3 +202,5 @@ Gatekeeper assessment: `spctl --assess` вернул rejected (exit 3). Это i
 - Проверка: CI должен пройти перед merge; после merge временная ветка удаляется, остаётся main. Актуальный результат CI и merge — в связанном PR, без ручного дублирования его статуса.
 
 Общий checkout нельзя переключать на другую ветку по workspace policy. Публикация выполняется из отдельного собственного worktree; его snapshot включает текущие изменения приложения, без локального WATCHDOG.
+
+Первый CI PR #73 на macOS 15: 767 passed, 2 skipped, coverage 84.45%; history geometry precondition обнаружил выход Process за bounds. History stack теперь учитывает системные alignmentRectInsets native controls по краям вместо привязки alignment rect к самому краю контейнера. Bounds assertions сохранены, добавлены диагностические rects; локальные 5 native tests и Swift typecheck прошли. Результат повторного macOS 15 gate отслеживается в PR.
