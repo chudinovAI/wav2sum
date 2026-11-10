@@ -196,9 +196,9 @@ Gatekeeper assessment: `spctl --assess` вернул rejected (exit 3). Это i
 - [x] Существующий installer атомарно обновил dev app; source digest `b4f3377e7a15` совпал с текущими исходниками. Named signer и designated requirement сохранены, Info.plist побайтно не изменился. Прежний bundle сохранён installer в собственном backup.
 - [x] Установленный app запущен, главное окно открыто штатным Open wav2sum. Actual AX: Start Call Recording/Settings/Refresh доступны, dictation ready, Microphone/Input Monitoring/Accessibility allowed. Real daemon: Cloud ready, recording=false, queued/running=0, auto_process=false; аудио/API-пробы не отправлялись.
 
-## 17. Опубликовать и смержить изменения — прямое поручение пользователя
+## 17. GitHub-публикация: [PR #73](https://github.com/chudinovAI/wav2sum/pull/73)
 
-- [ ] Создать временную рабочую ветку, закоммитить относящиеся к задаче source/tests/docs, открыть PR в main. Локальный `WATCHDOG.yml` — конфигурация агентов, не изменение приложения; в commit не включать. DMG/секреты/личные данные не публиковать.
-- [ ] Дождаться CI, смержить PR без обхода проверок, удалить временную ветку; конечное состояние локально и на GitHub — только main.
+- По прямому поручению пользователя опубликован snapshot source/tests/docs приложения. Локальный `WATCHDOG.yml`, DMG, секреты и личные данные не включены.
+- Проверка: CI должен пройти перед merge; после merge временная ветка удаляется, остаётся main. Актуальный результат CI и merge — в связанном PR, без ручного дублирования его статуса.
 
 Общий checkout нельзя переключать на другую ветку по workspace policy. Публикация выполняется из отдельного собственного worktree; его snapshot включает текущие изменения приложения, без локального WATCHDOG.
