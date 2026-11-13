@@ -2,6 +2,7 @@ import AppKit
 import AVFoundation
 import ApplicationServices
 import CoreAudio
+import AudioToolbox
 
 final class Hotkey {
     enum Key: String {
@@ -89,59 +90,197 @@ final class Hotkey {
 final class Microphone {
     var onLevel: ((Float) -> Void)?
 
-    private var engine = AVAudioEngine()
-    private let target = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16_000, channels: 1, interleaved: false)!
-    private var converter: AVAudioConverter?
+    // Lifecycle operations use control; PCM and recording state use the separate delivery queue.
+    struct Backend {
+        var route: () throws -> String
+        var observe: (DispatchQueue, @escaping () -> Void) throws -> () -> Void
+        var open: (String, DispatchQueue, DispatchQueue, @escaping (UnsafeBufferPointer<Float>) -> Bool,
+                   @escaping (Error) -> Void, @escaping (Bool) -> Void) throws -> (Bool) throws -> Void
+    }
+
+    private let backend: Backend
+    private let control = DispatchQueue(label: "wav2sum.microphone.control")
+    private let queue = DispatchQueue(label: "wav2sum.microphone.delivery")
     private var samples: [Float] = []
     private var taken = 0
-    private let lock = NSLock()
+    private var generation = 0
+    private var inputGeneration = 0
+    private var active = false
+    private var closing = false
+    private var draining = false
+    private var pendingError: Error?
+    private var recoveringStoppedInput = false
+    private var closeInput: ((Bool) throws -> Void)?
+    private var unobserve: (() -> Void)?
     private var startedAt = Date()
     private var waiting = (buffer: false, sound: false)
 
-    func start() throws {
-        lock.withLock {
-            samples.removeAll(keepingCapacity: true)
-            taken = 0
+    init(backend: Backend? = nil) { self.backend = backend ?? Self.liveBackend }
+
+    func start(onError: @escaping (Error) -> Void) throws {
+        try control.sync {
+            let session = queue.sync {
+                generation += 1
+                active = true
+                closing = false
+                pendingError = nil
+                recoveringStoppedInput = false
+                samples.removeAll(keepingCapacity: true)
+                taken = 0
+                startedAt = Date()
+                waiting = (true, true)
+                return generation
+            }
+            do {
+                // Register first so changes racing the initial route lookup are not missed.
+                unobserve = try backend.observe(control) { [weak self] in
+                    self?.rebuild(session: session, stopped: false, onError: onError)
+                }
+                try openInput(session: session, onError: onError)
+            } catch {
+                queue.sync { active = false; inputGeneration += 1 }
+                unobserve?(); unobserve = nil
+                throw error
+            }
         }
-        startedAt = Date()
-        waiting = (true, true)
-        // A long-lived engine keeps the input format it first saw; once the mic's sample rate
-        // changes, installTap raises an Objective-C exception that `try` can't catch.
-        engine = AVAudioEngine()
-        let input = engine.inputNode
-        if var device = Self.builtInIfBluetooth() {
-            Log.write("microphone: Bluetooth input, recording from the built-in one")
-            AudioUnitSetProperty(input.audioUnit!, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
-                                 &device, UInt32(MemoryLayout<AudioDeviceID>.size))
-        }
-        let format = input.outputFormat(forBus: 0)
-        guard format.sampleRate > 0, format.channelCount > 0 else {
-            throw NSError(domain: "wav2sum", code: 1, userInfo: [NSLocalizedDescriptionKey: "no input device"])
-        }
-        Log.write("microphone \(AVCaptureDevice.default(for: .audio)?.localizedName ?? "unknown") \(Int(format.sampleRate)) Hz")
-        converter = AVAudioConverter(from: format, to: target)
-        input.installTap(onBus: 0, bufferSize: 1600, format: format) { [weak self] buffer, _ in
-            self?.consume(buffer)
-        }
-        engine.prepare()
-        try engine.start()
     }
 
-    /// CHU-129: AirPods give silence for up to 0.8 s after the press, the Mac's microphone for 0.19 s,
-    /// so with a Bluetooth input we record from the built-in microphone, as Wispr Flow does.
-    private static func builtInIfBluetooth() -> AudioDeviceID? {
+    // Called only on control, never while holding the delivery queue.
+    private func openInput(session: Int, onError: @escaping (Error) -> Void) throws {
+        let route = try backend.route()
+        let input = queue.sync { inputGeneration += 1; return inputGeneration }
+        closeInput = try backend.open(route, control, queue, { [weak self] chunk in
+            guard let self, self.active, self.generation == session, self.inputGeneration == input,
+                  self.pendingError == nil, !self.closing || self.draining else { return false }
+            if !self.closing { self.recoveringStoppedInput = false }
+            self.consume(chunk, session: session, input: input)
+            return !self.closing
+        }, { [weak self] error in
+            guard let self, self.active, self.generation == session, self.inputGeneration == input else { return }
+            self.fail(error, session: session, onError: onError)
+        }, { [weak self] stopped in
+            guard let self, self.queue.sync(execute: {
+                self.active && self.generation == session && self.inputGeneration == input && self.pendingError == nil
+            }) else { return }
+            self.rebuild(session: session, stopped: stopped, onError: onError)
+        })
+    }
+
+    private func rebuild(session: Int, stopped: Bool, onError: @escaping (Error) -> Void) {
+        let retry = queue.sync { () -> Bool in
+            guard active, generation == session, pendingError == nil else { return false }
+            if stopped && recoveringStoppedInput {
+                fail(Self.error("input stopped unexpectedly", -1), session: session, onError: onError)
+                return false
+            }
+            if stopped { recoveringStoppedInput = true }
+            return true
+        }
+        guard retry else { return }
+        do {
+            try close(drain: true)
+            guard queue.sync(execute: { active && generation == session && pendingError == nil }) else { return }
+            try openInput(session: session, onError: onError)
+        } catch {
+            queue.sync { fail(error, session: session, onError: onError) }
+        }
+    }
+
+    // Mark closing before stopping; the backend waits for all delivery callbacks before returning.
+    private func close(drain: Bool) throws {
+        queue.sync {
+            closing = true
+            draining = drain
+            if !drain { active = false }
+        }
+        var closeError: Error?
+        do { try closeInput?(drain) } catch { closeError = error }
+        closeInput = nil
+        queue.sync { inputGeneration += 1; closing = false; draining = false }
+        if let closeError { throw closeError }
+    }
+
+    // Called on delivery. Keep the failure until a normal stop can synchronously report it.
+    private func fail(_ error: Error, session: Int, onError: @escaping (Error) -> Void) {
+        guard active, generation == session, pendingError == nil else { return }
+        pendingError = error
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.queue.sync(execute: { self.active && self.generation == session }) else { return }
+            onError(error)
+        }
+    }
+
+    func stop(_ drain: Bool) throws -> [Float] {
+        try control.sync {
+            var closeError: Error?
+            do { try close(drain: drain) } catch { closeError = error }
+            unobserve?(); unobserve = nil
+            let result = queue.sync { () -> ([Float], Error?) in
+                active = false
+                generation += 1
+                let failure = pendingError ?? closeError
+                pendingError = nil
+                return (samples, failure)
+            }
+            if drain, let error = result.1 { throw error }
+            return result.0
+        }
+    }
+
+    /// The samples recorded since the last call, including across input changes.
+    func take() -> [Float] {
+        queue.sync {
+            defer { taken = samples.count }
+            return Array(samples[taken...])
+        }
+    }
+
+    private func consume(_ chunk: UnsafeBufferPointer<Float>, session: Int, input: Int) {
+        samples.append(contentsOf: chunk)
+        let rms = sqrt(chunk.reduce(0) { $0 + $1 * $1 } / Float(max(chunk.count, 1)))
+        let ms = Int(Date().timeIntervalSince(startedAt) * 1000)
+        if waiting.buffer {
+            waiting.buffer = false
+            Log.write("microphone first buffer after \(ms) ms")
+        }
+        if waiting.sound && rms > 0 {
+            waiting.sound = false
+            Log.write("microphone first sound after \(ms) ms")
+        }
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.queue.sync(execute: {
+                self.active && self.pendingError == nil && self.generation == session && self.inputGeneration == input
+            }) else { return }
+            self.onLevel?(rms)
+        }
+    }
+
+    private static func error(_ operation: String, _ status: OSStatus) -> NSError {
+        NSError(domain: "wav2sum.microphone", code: Int(status),
+                userInfo: [NSLocalizedDescriptionKey: "\(operation) failed (OSStatus \(status))"])
+    }
+
+    private static func check(_ status: OSStatus, _ operation: String) throws {
+        if status != noErr { throw error(operation, status) }
+    }
+
+    /// AirPods can be slow to start; prefer a built-in input when Bluetooth is the default.
+    private static func selectedDevice() throws -> AudioDeviceID {
         let system = AudioObjectID(kAudioObjectSystemObject)
-        let bluetooth = [kAudioDeviceTransportTypeBluetooth, kAudioDeviceTransportTypeBluetoothLE]
         guard let input = property(system, kAudioHardwarePropertyDefaultInputDevice).first,
-              property(input, kAudioDevicePropertyTransportType).contains(where: bluetooth.contains)
-        else { return nil }
-        return property(system, kAudioHardwarePropertyDevices).first {
-            property($0, kAudioDevicePropertyTransportType) == [kAudioDeviceTransportTypeBuiltIn]
-                && !property($0, kAudioDevicePropertyStreams, kAudioObjectPropertyScopeInput).isEmpty
+              input != kAudioObjectUnknown else { throw error("finding input device", -1) }
+        let bluetooth = [kAudioDeviceTransportTypeBluetooth, kAudioDeviceTransportTypeBluetoothLE]
+        if property(input, kAudioDevicePropertyTransportType).contains(where: bluetooth.contains),
+           let builtIn = property(system, kAudioHardwarePropertyDevices).first(where: {
+               property($0, kAudioDevicePropertyTransportType) == [kAudioDeviceTransportTypeBuiltIn]
+                   && !property($0, kAudioDevicePropertyStreams, kAudioObjectPropertyScopeInput).isEmpty
+           }) {
+            Log.write("microphone: Bluetooth input, recording from the built-in one")
+            return builtIn
         }
+        return input
     }
 
-    /// A CoreAudio property made of UInt32 values: device ids, stream ids or the transport type.
     private static func property(_ id: AudioObjectID, _ selector: AudioObjectPropertySelector,
                                  _ scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal) -> [UInt32] {
         var address = AudioObjectPropertyAddress(mSelector: selector, mScope: scope, mElement: kAudioObjectPropertyElementMain)
@@ -152,45 +291,127 @@ final class Microphone {
         return values
     }
 
-    func stop() -> [Float] {
-        engine.inputNode.removeTap(onBus: 0)
-        engine.stop()
-        return lock.withLock { samples }
+    private static func uid(_ device: AudioDeviceID) throws -> String {
+        var address = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyDeviceUID,
+                                                 mScope: kAudioObjectPropertyScopeGlobal,
+                                                 mElement: kAudioObjectPropertyElementMain)
+        var value: Unmanaged<CFString>?
+        var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        try check(AudioObjectGetPropertyData(device, &address, 0, nil, &size, &value), "reading input UID")
+        guard let value else { throw error("reading input UID", -1) }
+        return value.takeRetainedValue() as String
     }
 
-    /// The samples recorded since the last call.
-    func take() -> [Float] {
-        lock.withLock {
-            defer { taken = samples.count }
-            return Array(samples[taken...])
+    private static func listen(_ object: AudioObjectID, _ selector: AudioObjectPropertySelector,
+                               _ scope: AudioObjectPropertyScope = kAudioObjectPropertyScopeGlobal,
+                               queue: DispatchQueue, changed: @escaping () -> Void) throws -> () -> Void {
+        var address = AudioObjectPropertyAddress(mSelector: selector, mScope: scope, mElement: kAudioObjectPropertyElementMain)
+        let block: AudioObjectPropertyListenerBlock = { _, _ in changed() }
+        try check(AudioObjectAddPropertyListenerBlock(object, &address, queue, block), "observing input")
+        return {
+            var address = address
+            let status = AudioObjectRemovePropertyListenerBlock(object, &address, queue, block)
+            if status != noErr { Log.write("microphone: removing input observer failed (\(status))") }
         }
     }
 
-    private func consume(_ buffer: AVAudioPCMBuffer) {
-        guard let converter else { return }
-        let capacity = AVAudioFrameCount(Double(buffer.frameLength) * target.sampleRate / buffer.format.sampleRate) + 32
-        guard let out = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: capacity) else { return }
-        var fed = false
-        converter.convert(to: out, error: nil) { _, status in
-            if fed { status.pointee = .noDataNow; return nil }
-            fed = true
-            status.pointee = .haveData
-            return buffer
-        }
-        let chunk = UnsafeBufferPointer(start: out.floatChannelData![0], count: Int(out.frameLength))
-        lock.withLock { samples.append(contentsOf: chunk) }
-        let rms = sqrt(chunk.reduce(0) { $0 + $1 * $1 } / Float(max(chunk.count, 1)))
-        // CHU-129: how long the first word waits for the microphone, e.g. AirPods switching to headset mode.
-        let ms = Int(Date().timeIntervalSince(startedAt) * 1000)
-        if waiting.buffer {
-            waiting.buffer = false
-            Log.write("microphone first buffer after \(ms) ms")
-        }
-        if waiting.sound && rms > 0 {
-            waiting.sound = false
-            Log.write("microphone first sound after \(ms) ms")
-        }
-        DispatchQueue.main.async { self.onLevel?(rms) }
+    private final class QueueState {
+        var active = true
+        var changed: (() -> Void)?
+    }
+
+    private static let queueChanged: AudioQueuePropertyListenerProc = { context, _, _ in
+        guard let context else { return }
+        Unmanaged<QueueState>.fromOpaque(context).takeUnretainedValue().changed?()
+    }
+
+    private static var liveBackend: Backend {
+        Backend(route: { try uid(selectedDevice()) }, observe: { queue, changed in
+            try listen(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDefaultInputDevice,
+                       queue: queue, changed: changed)
+        }, open: { route, control, queue, consume, failed, changed in
+            let system = AudioObjectID(kAudioObjectSystemObject)
+            guard let device = property(system, kAudioHardwarePropertyDevices).first(where: { (try? uid($0)) == route })
+            else { throw error("finding selected input", -1) }
+            var format = AudioStreamBasicDescription(mSampleRate: 16_000, mFormatID: kAudioFormatLinearPCM,
+                mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
+                mBytesPerPacket: 4, mFramesPerPacket: 1, mBytesPerFrame: 4, mChannelsPerFrame: 1, mBitsPerChannel: 32,
+                mReserved: 0)
+            var audio: AudioQueueRef?
+            let creation = AudioQueueNewInputWithDispatchQueue(&audio, &format, 0, queue) { audio, buffer, _, _, _ in
+                let count = Int(buffer.pointee.mAudioDataByteSize) / MemoryLayout<Float>.size
+                let data = buffer.pointee.mAudioData.assumingMemoryBound(to: Float.self)
+                guard consume(UnsafeBufferPointer(start: data, count: count)) else { return }
+                let status = AudioQueueEnqueueBuffer(audio, buffer, 0, nil)
+                if status != noErr { failed(error("re-enqueueing input", status)) }
+            }
+            if creation != noErr {
+                if let audio { _ = AudioQueueDispose(audio, true); queue.sync {} }
+                throw error("creating input queue", creation)
+            }
+            guard let audio else { throw error("creating input queue", -1) }
+            var observers: [() -> Void] = []
+            let state = QueueState()
+            state.changed = { [weak state] in
+                control.async {
+                    guard let state, state.active else { return }
+                    var running: UInt32 = 0
+                    var size = UInt32(MemoryLayout<UInt32>.size)
+                    let status = AudioQueueGetProperty(audio, kAudioQueueProperty_IsRunning, &running, &size)
+                    if status != noErr { queue.sync { failed(error("reading input state", status)) } }
+                    else if running == 0 { changed(true) }
+                }
+            }
+            let context = Unmanaged.passUnretained(state).toOpaque()
+            var listening = false
+            do {
+                let uid = route as CFString
+                var deviceUID = Unmanaged.passUnretained(uid)
+                try withExtendedLifetime(uid) {
+                    try check(AudioQueueSetProperty(audio, kAudioQueueProperty_CurrentDevice, &deviceUID,
+                                                    UInt32(MemoryLayout<Unmanaged<CFString>>.size)), "selecting input")
+                }
+                for selector in [kAudioDevicePropertyNominalSampleRate, kAudioDevicePropertyDeviceIsAlive] {
+                    observers.append(try listen(device, selector, queue: control, changed: { changed(false) }))
+                }
+                observers.append(try listen(device, kAudioDevicePropertyStreams, kAudioObjectPropertyScopeInput,
+                                            queue: control, changed: { changed(false) }))
+                try check(AudioQueueAddPropertyListener(audio, kAudioQueueProperty_IsRunning, queueChanged, context),
+                          "observing input state")
+                listening = true
+                for _ in 0..<3 {
+                    var buffer: AudioQueueBufferRef?
+                    try check(AudioQueueAllocateBuffer(audio, 1600 * 4, &buffer), "allocating input buffer")
+                    guard let buffer else { throw error("allocating input buffer", -1) }
+                    try check(AudioQueueEnqueueBuffer(audio, buffer, 0, nil), "enqueuing input buffer")
+                }
+                try check(AudioQueueStart(audio, nil), "starting input")
+            } catch {
+                state.active = false
+                observers.forEach { $0() }
+                if listening { AudioQueueRemovePropertyListener(audio, kAudioQueueProperty_IsRunning, queueChanged, context) }
+                _ = AudioQueueDispose(audio, true)
+                queue.sync {}
+                withExtendedLifetime(state) {}
+                throw error
+            }
+            return { drain in
+                state.active = false
+                observers.forEach { $0() }
+                let status = AudioQueueRemovePropertyListener(audio, kAudioQueueProperty_IsRunning, queueChanged, context)
+                if status != noErr { Log.write("microphone: removing queue observer failed (\(status))") }
+                // control is separate from the delivery queue, so stop can wait for its callbacks.
+                let flushed = drain ? AudioQueueFlush(audio) : noErr
+                let stopped = AudioQueueStop(audio, true)
+                queue.sync {}
+                let disposed = AudioQueueDispose(audio, true)
+                queue.sync {}
+                withExtendedLifetime(state) {}
+                try check(flushed, "flushing input")
+                try check(stopped, "stopping input")
+                try check(disposed, "disposing input")
+            }
+        })
     }
 }
 
@@ -841,7 +1062,7 @@ final class DictationController {
     private let doubleTapWindow = 0.4
 
     struct Effects {
-        var audio: (start: () throws -> Void, stop: () -> [Float], take: () -> [Float])
+        var audio: (start: (@escaping (Error) -> Void) throws -> Void, stop: (Bool) throws -> [Float], take: () -> [Float])
         var context: (_ aroundCursor: Bool) -> JSON
         var selectedText: (@escaping (String?) -> Void) -> Void
         typealias Insertion = (String, String, CFTimeInterval, CFTimeInterval, @escaping () -> Void) -> Void
@@ -973,7 +1194,13 @@ final class DictationController {
         }
         guard phase == .starting, self.session == session else { return }
         do {
-            try effects.audio.start()
+            try effects.audio.start { [weak self] error in
+                guard let self, self.session == session,
+                      self.phase == .recording || self.phase == .handsFree else { return }
+                Log.write("microphone failed: \(error)")
+                self.cancel()
+                self.onError?("Microphone: \(error.localizedDescription)")
+            }
         } catch {
             Log.write("microphone failed: \(error)")
             self.session = nil
@@ -982,7 +1209,7 @@ final class DictationController {
             return
         }
         guard phase == .starting, self.session == session else {
-            _ = effects.audio.stop()
+            _ = try? effects.audio.stop(false)
             return
         }
         phase = handsFree ? .handsFree : .recording
@@ -1014,7 +1241,7 @@ final class DictationController {
         streamTimer?.invalidate()
         streamTimer = nil
         if phase == .recording || phase == .handsFree {
-            _ = effects.audio.stop()
+            _ = try? effects.audio.stop(false)
         }
         if streamed, let session { effects.request("dictate_cancel", ["session": session], nil) }
         session = nil
@@ -1028,7 +1255,15 @@ final class DictationController {
     func finish(releasedAt: CFTimeInterval = CACurrentMediaTime()) {
         streamTimer?.invalidate()
         streamTimer = nil
-        let samples = effects.audio.stop()
+        let samples: [Float]
+        do {
+            samples = try effects.audio.stop(true)
+        } catch {
+            Log.write("microphone failed: \(error)")
+            cancel()
+            onError?("Microphone: \(error.localizedDescription)")
+            return
+        }
         phase = .processing
         guard samples.count > 16_000 / 4 else {
             Log.write("too short: \(samples.count) samples")
