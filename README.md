@@ -146,6 +146,9 @@ The selected mode is visible in TUI and the menu bar menu; `wav2sum status` repo
   Esc cancels recording or a pending insertion; late replies from a cancelled dictation are ignored. Cancellation
   also closes its cloud stream and prevents a still-running final result from being saved to history.
   An already-running local inference or LLM request may finish, but its cancelled result is discarded.
+  Microphone changes keep the audio already captured in the current dictation; switching hardware can leave a short
+  gap. With a Bluetooth default input, dictation prefers the Mac's built-in microphone. If capture cannot continue,
+  the main window shows a microphone error and you can start another dictation after an input is available.
 - **Edit by voice.** Select some text, hold ⇧ + right ⌥, and say what to do ("make it shorter", "translate to English");
   the result replaces the selection.
 - **Dictate in English.** Hold ⌃ + right ⌥ and speak Russian or English; clean English text is pasted at the cursor.

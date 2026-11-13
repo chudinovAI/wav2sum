@@ -204,3 +204,23 @@ Gatekeeper assessment: `spctl --assess` вернул rejected (exit 3). Это i
 Общий checkout нельзя переключать на другую ветку по workspace policy. Публикация выполняется из отдельного собственного worktree; его snapshot включает текущие изменения приложения, без локального WATCHDOG.
 
 Первый CI PR #73 на macOS 15: 767 passed, 2 skipped, coverage 84.45%; history geometry precondition обнаружил выход Process за bounds. History stack теперь учитывает системные alignmentRectInsets native controls по краям вместо привязки alignment rect к самому краю контейнера. Bounds assertions сохранены, добавлены диагностические rects; локальные 5 native tests и Swift typecheck прошли. Результат повторного macOS 15 gate отслеживается в PR.
+
+## 18. Переключение микрофона без поломки диктовки — выполнено, установлено локально
+
+13 ноября 2026: пользователь поручил исправить диктовку после смены микрофона. На рабочем app системный журнал подтвердил AVFoundation exception в installTap: hardware 48 кГц против client 16 кГц при переключении Bluetooth WH-1000XM5. После ошибки нажатия приходят, но захват не начинается; Ready не доказывает исправность аудиовхода.
+
+- [x] Регрессии написаны до production-кода: смена устройства/частоты, сохранение PCM и streaming cursor, drain доставленного хвоста, ошибка перед release без отправки частичного результата, cancel/старые callbacks и следующая попытка после ошибки.
+- [x] Audio Queue input отделён от hardware format. Отдельная lifecycle queue закрывает старый вход до открытия нового; обычный stop выполняет Flush/Stop/Dispose и delivery-барьеры, cancel отбрасывает поздние данные. Ошибки относятся только к текущей сессии.
+- [x] Узкий gate: 7 native tests passed, Swift typecheck всего app, scoped Ruff чисто; после последней Flush-правки отдельно 1 controller regression passed и app typecheck без новых предупреждений. Actual isolated UI: реальный controller → окно показал capture error, затем следующая попытка перешла в Listening. Независимые review0 → fix1 → review1 → fix2 → review2: подтверждённых замечаний не осталось; README/ARCHITECTURE обновлены.
+
+Без изменений хранения, протокола, режима Local/Cloud, ключей, разрешений, bundle id/signing/Info.plist и зависимостей. Рабочий bundle не устанавливать/перезапускать без отдельного согласования; live capture/API — не часть synthetic-проверки.
+
+Выбран Audio Queue input с фиксированным client PCM float32/mono/16 кГц: преобразование hardware format выполняет Core Audio, вместо AVAudioEngine.installTap с форматом, который мог устареть между чтением и установкой. Выбор устройства по UID предшествует старту; Bluetooth сохраняет прежнее предпочтение встроенного микрофона. Смена default input перестраивает только захват, а не диктовочную сессию; накопленный PCM и streaming cursor сохраняются. Непредвиденная ошибка отменяет только текущую сессию и видна в GUI; следующая попытка разрешена.
+
+Пользователь отдельно разрешил обновить `~/Applications/Wav2Sum.app` и завершить только native Wav2Sum через SIGTERM, затем открыть исправленный bundle. Демон PID 1269 не перезапускается; активные recording/jobs блокируют установку. Существующие signing requirement/bundle id/Info.plist и режим сохраняются, предыдущий bundle оставляет installer. Реальный Bluetooth/capture/partial hardware buffer tail, live ASR/API и качество распознавания synthetic-проверкой не доказаны; физическое переключение может дать разрыв звука. Необходимых изменений вне шага нет.
+
+- [x] Обновлён dev bundle, source digest `4aef1e8476f2`; installer сохранил предыдущий bundle, signing requirement и Info.plist побайтно прежние. Старый native PID 1311 завершён отдельно, исправленный app открыт. Actual AX: Cloud Ready, диктовка Ready, прежние Microphone/Input Monitoring/Accessibility allowed. После запуска daemon по-прежнему PID 1269, ready, recording=null, jobs=[]; перезапуска/стартовой retention и live capture/API-проб не было. Owned synthetic UI/scratch удалены; commit/push не выполнялись.
+
+## 19. GitHub-публикация исправления микрофона
+
+По прямому поручению пользователя — commit/push и merge исправления шага 18. Публикуются только Dictation.swift, native_dictation_handoff.swift и связанные README/ARCHITECTURE/PLAN; локальный WATCHDOG.yml не включается. Общий checkout остаётся на main без переключения и очистки пользовательских файлов; публикация из отдельного owned worktree. Merge после успешного CI, временная ветка удаляется. Фактические CI/merge и номер PR — в GitHub, без ручного дублирования статуса.
