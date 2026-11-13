@@ -40,7 +40,7 @@ class Subsampling(torch.nn.Module):
 
 class Positions(torch.nn.Module):
     def extend_pe(self, length, device):
-        self.pe = torch.arange(2 * length, dtype=torch.float32, device=device)
+        self.pe = torch.linspace(-1, 1, 2 * length, dtype=torch.float32, device=device)
 
 
 class Attention(torch.nn.Module):
@@ -75,7 +75,7 @@ class Encoder(torch.nn.Module):
 
 def test_padding_to_a_fixed_shape_does_not_change_the_frames_of_the_clip():
     encoder = coreml.MaskedEncoder(Encoder()).eval()
-    features = torch.randn(1, 4, 21)
+    features = torch.linspace(-1, 1, 4 * 21).reshape(1, 4, 21)
 
     encoded, length = encoder(features, torch.tensor([21]))
     padded, padded_length = encoder(coreml.pad(features, [40, 80]), torch.tensor([21]))

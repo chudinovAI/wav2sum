@@ -224,3 +224,7 @@ Gatekeeper assessment: `spctl --assess` вернул rejected (exit 3). Это i
 ## 19. GitHub-публикация исправления микрофона
 
 По прямому поручению пользователя — commit/push и merge исправления шага 18. Публикуются только Dictation.swift, native_dictation_handoff.swift и связанные README/ARCHITECTURE/PLAN; локальный WATCHDOG.yml не включается. Общий checkout остаётся на main без переключения и очистки пользовательских файлов; публикация из отдельного owned worktree. Merge после успешного CI, временная ветка удаляется. Фактические CI/merge и номер PR — в GitHub, без ручного дублирования статуса.
+
+Первый CI PR #74: native-проверки прошли; 767 passed / 2 skipped / 1 failed в прежнем Core ML padding-тесте. При нефиксированном случайном входе и неограниченных позиционных значениях float32-разница достигла 2.13e-6 относительно допуска 1.3e-6. Пользователь отдельно разрешил стабилизировать тестовый пример: ограниченные positional values и детерминированные features, без смены float32, проверок формы/длины, допусков assert_close и production Core ML. Merge по-прежнему требует зелёного CI.
+
+Проверка CI-фикстуры: 4 Core ML tests passed, scoped Ruff check/format чистые. Throwaway с 17/21/37 кадрами сохранил padded-prefix parity и отверг вариант без attention mask при прежних допусках; независимое ревью двух строк без замечаний. Случайные признаки/большие positional values больше не являются частью этого теста; его контракт — маскирование padding, не точность произвольных float32 вычислений.
