@@ -14,6 +14,7 @@ def choice(**changes):
         "completed": True,
         "mode": "local",
         "auto_process": False,
+        "calls_enabled": True,
         "call_model": "qwen",
         "cleanup_model": "mlx-community/gemma-4-E4B-it-qat-4bit",
         "cloud_consent": False,
@@ -32,6 +33,29 @@ def test_cloud_and_automatic_upload_require_distinct_explicit_consent():
     )
     assert result["mode"] == "cloud" and result["auto_process"]
     assert configuration.validate_settings(choice(auto_process=True))["auto_process"]
+
+
+@pytest.mark.parametrize("consent", [False, True])
+def test_cloud_auto_processing_consent_deferred_while_calls_disabled(tmp_path, consent):
+    path = tmp_path / "settings.json"
+    values = choice(
+        mode="cloud",
+        cloud_consent=True,
+        auto_process=True,
+        auto_cloud_consent=consent,
+        calls_enabled=False,
+    )
+    saved = configuration.save_preferences(values, path)
+    assert saved["auto_process"] is True
+    assert saved["auto_cloud_consent"] is consent
+    assert configuration.load_preferences(path) == values
+    if consent:
+        assert configuration.validate_settings({**saved, "calls_enabled": True})["auto_cloud_consent"]
+    else:
+        with pytest.raises(ValueError, match="consent"):
+            configuration.validate_settings({**saved, "calls_enabled": True})
+    with pytest.raises(ValueError, match="consent"):
+        configuration.validate_settings({**values, "cloud_consent": False})
 
 
 @pytest.mark.parametrize(
@@ -80,6 +104,79 @@ def test_app_preferences_override_processing_not_cli_cloud_or_user_paths(tmp_pat
     assert loaded.me == "Friend"
     assert loaded.recordings_dir == Path("~/private-calls").expanduser()
     assert "cloud" not in config.read_text()
+
+
+def test_legacy_calls_setting_defaults_true_and_disabled_persists_without_cloud_switch(tmp_path):
+    path = tmp_path / "prefs.json"
+    legacy = choice(mode="cloud", cloud_consent=True)
+    del legacy["calls_enabled"]
+    path.write_text(json.dumps(legacy))
+    assert configuration.load_preferences(path)["calls_enabled"] is True
+    saved = configuration.save_preferences({**legacy, "calls_enabled": False}, path)
+    cfg = load_config(tmp_path / "missing.toml", preferences_path=path)
+    assert saved["calls_enabled"] is False
+    assert json.loads(path.read_text())["calls_enabled"] is False
+    assert not cfg.calls_enabled and not cfg.cloud
+    assert cfg.call_model == legacy["call_model"]
+
+
+@pytest.mark.parametrize("value", [None, 0, 1, "false", [], {}])
+def test_calls_enabled_requires_boolean(value):
+    with pytest.raises(ValueError, match="boolean"):
+        configuration.validate_settings(choice(calls_enabled=value))
+
+
+def test_calls_toggle_uses_idle_guard_and_restart(tmp_path, monkeypatch):
+    from wav2sum import daemon
+
+    monkeypatch.setattr(daemon, "EDITS_PATH", tmp_path / "edits.jsonl")
+    monkeypatch.setattr(daemon, "VOCABULARY_PATH", tmp_path / "vocabulary.json")
+
+    async def scenario():
+        d = daemon.Daemon(Config(call_model="qwen"))
+        d.stopping = asyncio.Event()
+        path = tmp_path / "prefs.json"
+        monkeypatch.setattr(configuration, "PREFERENCES_PATH", path)
+        for busy in ("recorder", "streams", "queued", "running", "loading"):
+            d.recorder = object() if busy == "recorder" else None
+            d.streams = {object(): object()} if busy == "streams" else {}
+            d.jobs = [daemon.Job(1, "call", state=busy)] if busy in ("queued", "running") else []
+            d.loading_models = busy == "loading"
+            with pytest.raises(ValueError):
+                await d._configure(choice(calls_enabled=False))
+            assert not path.exists() and not d.stopping.is_set()
+        d.loading_models = False
+        result = await d._configure(choice(calls_enabled=False))
+        assert result["restart"] and d.stopping.is_set()
+        assert d.cfg.calls_enabled is True
+        assert configuration.load_preferences(path)["calls_enabled"] is False
+        d2 = daemon.Daemon(Config(call_model="qwen", calls_enabled=False))
+        d2.stopping = asyncio.Event()
+        result = await d2._configure(choice(calls_enabled=True))
+        assert result["restart"] and d2.stopping.is_set()
+        assert configuration.load_preferences(path)["calls_enabled"] is True
+
+    asyncio.run(scenario())
+
+
+def test_prepare_disabled_calls_skips_memory_guard_and_passes_flag(monkeypatch):
+    from wav2sum import local_models
+
+    monkeypatch.setattr(local_models, "check_memory", lambda *_a, **_k: pytest.fail("checked call memory"))
+    prepared = []
+    monkeypatch.setattr(local_models, "prepare_models", lambda *a, **kw: prepared.append((a, kw)) or {})
+    result = settings.handle(
+        {
+            "action": "prepare_models",
+            "call_model": "nemotron",
+            "calls_enabled": False,
+            "hf_token": "secret",
+        }
+    )
+    assert result["ok"]
+    assert prepared[0][1]["calls_enabled"] is False
+    with pytest.raises(ValueError, match="boolean"):
+        settings.handle({"action": "prepare_models", "call_model": "qwen", "calls_enabled": "false"})
 
 
 def test_key_save_gathers_both_before_any_keychain_change(monkeypatch):

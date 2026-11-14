@@ -42,6 +42,14 @@ final class HistoryView: NSView, NSTableViewDataSource, NSTableViewDelegate {
     var onOpen: ((String) -> Void)?
     var onRefresh: (() -> Void)?
     var cloud = false { didSet { if oldValue != cloud { updateActions() } } }
+    var callsEnabled = true {
+        didSet {
+            guard oldValue != callsEnabled else { return }
+            kind.isHidden = !callsEnabled
+            if !callsEnabled { kind.selectedSegment = 1 }
+            reloadSelection()
+        }
+    }
 
     private let kind = NSSegmentedControl(labels: ["Calls", "Dictations"], trackingMode: .selectOne, target: nil, action: nil)
     private let table = NSTableView()
@@ -238,7 +246,7 @@ final class HistoryView: NSView, NSTableViewDataSource, NSTableViewDelegate {
         return matches.count == 1 ? matches[0] : nil
     }
 
-    private var showingCalls: Bool { kind.selectedSegment == 0 }
+    private var showingCalls: Bool { callsEnabled && kind.selectedSegment == 0 }
     private var entries: [JSON] { showingCalls ? calls : dictations }
 
     private func reloadSelection() {

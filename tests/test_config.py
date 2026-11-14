@@ -69,6 +69,12 @@ def test_missing_file_gives_defaults(tmp_path):
     assert load_config(tmp_path / "nope.toml") == Config()
 
 
+@pytest.mark.parametrize("value", ["false", 0, 1, None])
+def test_calls_enabled_config_rejects_non_boolean(value):
+    with pytest.raises(ValueError, match="boolean"):
+        Config(calls_enabled=value)
+
+
 @pytest.mark.parametrize(
     "value",
     [True, 16384, 0.5, "Андрей", 'a\\b "c"', ["us.zoom", "Cisco-Systems.Spark"], {'"кавычки"': "me@example.com"}],

@@ -139,17 +139,20 @@ def snapshot_path(repo, revision, required):
         return None
 
 
-def model_status(call_model, cleanup_model):
+def model_status(call_model, cleanup_model, calls_enabled=True):
     if call_model not in ("qwen", "nemotron") or cleanup_model != CLEANUP_MODEL:
         raise ValueError("Unknown local model selection")
     qwen = snapshot_path(QWEN_MODEL, QWEN_REVISION, QWEN_FILES)
     cleanup = snapshot_path(CLEANUP_MODEL, CLEANUP_REVISION, CLEANUP_FILES)
-    diarization = snapshot_path(DIARIZATION_MODEL, DIARIZATION_REVISION, DIARIZATION_FILES)
-    binary, model = speech_paths()
+    diarization = snapshot_path(DIARIZATION_MODEL, DIARIZATION_REVISION, DIARIZATION_FILES) if calls_enabled else None
+    nemotron = False
+    if calls_enabled:
+        binary, model = speech_paths()
+        nemotron = binary.is_file() and model.is_file()
     return {
         "qwen": bool(qwen),
         "cleanup": bool(cleanup),
-        "nemotron": binary.is_file() and model.is_file(),
+        "nemotron": nemotron,
         "diarization": bool(diarization),
         "diarization_note": (
             "Optional for mono or multi-speaker calls: accept the pyannote terms on Hugging Face, "
@@ -202,13 +205,13 @@ def _prepare_speech():
             shutil.move(str(matches[0].parent), str(installed))
 
 
-def prepare_models(call_model, cleanup_model, hf_token=None):
+def prepare_models(call_model, cleanup_model, hf_token=None, *, calls_enabled=True):
     if call_model not in ("qwen", "nemotron") or cleanup_model != CLEANUP_MODEL:
         raise ValueError("Unknown local model selection")
     try:
         _snapshot(QWEN_MODEL, QWEN_REVISION, token=False)
         _snapshot(CLEANUP_MODEL, CLEANUP_REVISION, token=False)
-        if call_model == "nemotron":
+        if calls_enabled and call_model == "nemotron":
             _prepare_speech()
             source = Path(hf_hub_download(NEMOTRON_MODEL, NEMOTRON_FILE, revision=NEMOTRON_REVISION, token=False))
             if _sha256(source) != NEMOTRON_SHA256:
@@ -216,7 +219,7 @@ def prepare_models(call_model, cleanup_model, hf_token=None):
             destination = model_root() / "nemotron-IQ4_NL.gguf"
             if not destination.exists():
                 os.symlink(source, destination)
-        if hf_token:
+        if calls_enabled and hf_token:
             try:
                 _snapshot(DIARIZATION_MODEL, DIARIZATION_REVISION, token=hf_token)
             except Exception:
@@ -227,4 +230,4 @@ def prepare_models(call_model, cleanup_model, hf_token=None):
         if hf_token and hf_token in str(exc):
             raise RuntimeError("Model preparation failed; check network access and Hugging Face access.") from None
         raise
-    return model_status(call_model, cleanup_model)
+    return model_status(call_model, cleanup_model) if calls_enabled else model_status(call_model, cleanup_model, False)

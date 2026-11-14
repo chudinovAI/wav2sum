@@ -11,6 +11,7 @@ final class SetupWindow: NSObject {
     var onApplied: ((JSON, Bool) -> Void)?
     private let window: NSWindow
     private let mode = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let callsEnabled = NSButton(checkboxWithTitle: "Enable call recording and processing", target: nil, action: nil)
     private let autoProcess = NSButton(checkboxWithTitle: "Automatically process completed calls", target: nil, action: nil)
     private let cloudConsent = NSButton(checkboxWithTitle: "I consent to cloud processing and provider charges", target: nil, action: nil)
     private let autoConsent = NSButton(checkboxWithTitle: "I separately consent to automatic cloud uploads", target: nil, action: nil)
@@ -26,9 +27,14 @@ final class SetupWindow: NSObject {
     private let applyButton = NSButton(title: "Apply Settings", target: nil, action: nil)
     private var loaded = false
     private var working = false
+    private var refreshing = false
+    private var refreshRequested = false
+    private var refreshPreservesDraft = true
+    private var refreshCompletions: [(JSON?) -> Void] = []
     private let initialCloud: Bool
     private var localViews: [NSView] = []
     private var cloudViews: [NSView] = []
+    private var callViews: [NSView] = []
     private let permissionStatus = NSTextField(wrappingLabelWithString: "")
     private let permissions: () -> String
 
@@ -148,15 +154,22 @@ final class SetupWindow: NSObject {
         autoConsent.identifier = NSUserInterfaceItemIdentifier("settings.autoConsent")
         autoProcess.target = self; autoProcess.action = #selector(automaticChanged)
         add(mode, to: processing)
+        callsEnabled.identifier = NSUserInterfaceItemIdentifier("settings.callsEnabled")
+        callsEnabled.target = self; callsEnabled.action = #selector(callsChanged)
+        add(callsEnabled, to: processing)
         add(cloudConsent, to: processing)
         add(autoProcess, to: processing)
         add(autoConsent, to: processing)
-        add(label("Automatic local processing produces transcripts only. Automatic cloud processing sends call audio and text to providers and can create summaries.", secondary: true), to: processing, fill: true)
+        let automationNote = label("Automatic local processing produces transcripts only. Automatic cloud processing sends call audio and text to providers and can create summaries.", secondary: true)
+        add(automationNote, to: processing, fill: true)
 
         let local = section("Local Models", identifier: "settings.localModels")
-        add(label("Downloads: Qwen about 4.1 GB, cleanup about 6.8 GB; Nemotron adds about 19 GB. Downloads start only when requested.", secondary: true), to: local, fill: true)
-        add(label("Local call model (Qwen is lighter; Nemotron requires substantially more memory):"), to: local, fill: true)
+        let downloadNote = label("Call models and diarization are downloaded only when requested.", secondary: true)
+        let modelLabel = label("Local call model (Qwen is lighter; Nemotron requires substantially more memory):")
+        add(downloadNote, to: local, fill: true)
+        add(modelLabel, to: local, fill: true)
         callModel.addItems(withTitles: ["Qwen", "Nemotron"])
+        callModel.identifier = NSUserInterfaceItemIdentifier("settings.callModel")
         callModel.setAccessibilityLabel("Local call model")
         add(callModel, to: local)
         add(unsafeModel, to: local)
@@ -170,9 +183,13 @@ final class SetupWindow: NSObject {
         hfToken.placeholderString = "Optional Hugging Face token for this download only"
         hfToken.setAccessibilityLabel("Optional Hugging Face token")
         add(hfToken, to: local, fill: true)
-        add(label("Speaker diarization for local calls needs pyannote access. Accept its terms yourself on Hugging Face, then enter a token for preparation. Dictation does not need this token.", secondary: true), to: local, fill: true)
-        add(button("Open pyannote Access / Terms", #selector(openModelTerms)), to: local)
-        add(button("Prepare / Download Local Models", #selector(prepare)), to: local)
+        let diarizationNote = label("Speaker diarization for local calls needs pyannote access. Accept its terms yourself on Hugging Face, then enter a token for preparation. Dictation does not need this token.", secondary: true)
+        let terms = button("Open pyannote Access / Terms", #selector(openModelTerms))
+        add(diarizationNote, to: local, fill: true)
+        add(terms, to: local)
+        let prepareButton = button("Prepare / Download Local Models", #selector(prepare))
+        prepareButton.identifier = NSUserInterfaceItemIdentifier("settings.prepareModels")
+        add(prepareButton, to: local)
         localViews = [local]
 
         let cloud = section("Cloud Credentials", identifier: "settings.cloudCredentials")
@@ -188,17 +205,20 @@ final class SetupWindow: NSObject {
         cloudViews = [cloud]
 
         let permissionSection = section("Permissions", identifier: "settings.permissions")
-        add(label("Permissions are optional until needed. Grant Microphone for dictation, Input Monitoring and Accessibility for the hotkey and paste, and System Audio Recording for calls.", secondary: true), to: permissionSection, fill: true)
+        add(label("Permissions are optional until needed. Grant Microphone for dictation, Input Monitoring and Accessibility for the hotkey and paste.", secondary: true), to: permissionSection, fill: true)
         let permissionRow = NSStackView(views: [button("Microphone", #selector(microphone)), button("Input Monitoring", #selector(inputMonitoring)), button("Accessibility", #selector(accessibility))])
         permissionRow.spacing = 6
         add(permissionRow, to: permissionSection)
-        let additionalPermissionRow = NSStackView(views: [button("System Audio Settings", #selector(systemAudio)), button("Notifications", #selector(notifications))])
+        let systemAudioButton = button("System Audio Settings", #selector(systemAudio))
+        let additionalPermissionRow = NSStackView(views: [systemAudioButton, button("Notifications", #selector(notifications))])
         additionalPermissionRow.spacing = 6
         add(additionalPermissionRow, to: permissionSection)
         permissionStatus.textColor = .secondaryLabelColor
         permissionStatus.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         permissionStatus.setAccessibilityLabel("Permission status")
         add(permissionStatus, to: permissionSection, fill: true)
+        callViews = [autoProcess, automationNote, downloadNote, modelLabel, callModel, unsafeModel,
+                     detail, hfToken, diarizationNote, terms, systemAudioButton]
         window.center()
         updateModeVisibility()
         updatePermissionStatus()
@@ -217,13 +237,29 @@ final class SetupWindow: NSObject {
     }
 
     func refresh(preserveDraft: Bool = false, completion: ((JSON?) -> Void)? = nil) {
+        refreshRequested = true
+        refreshPreservesDraft = refreshPreservesDraft && preserveDraft
+        if let completion { refreshCompletions.append(completion) }
+        startRefreshIfNeeded()
+    }
+
+    private func startRefreshIfNeeded() {
+        guard refreshRequested && !refreshing && !working else { return }
+        refreshing = true
+        applyButton.isEnabled = false
         DaemonProcess.setup(["action": "status"]) { [weak self] reply in
             guard let self else { return }
+            let preserveDraft = self.refreshPreservesDraft
+            let completions = self.refreshCompletions
+            self.refreshing = false
+            self.refreshRequested = false
+            self.refreshPreservesDraft = true
+            self.refreshCompletions = []
             guard reply["ok"] as? Bool == true, let settings = reply["settings"] as? JSON else {
                 self.loaded = false
                 self.result.stringValue = reply["error"] as? String ?? "Could not read settings."
                 self.applyButton.isEnabled = false
-                completion?(nil)
+                completions.forEach { $0(nil) }
                 return
             }
             self.loaded = true
@@ -235,6 +271,9 @@ final class SetupWindow: NSObject {
             let recommendation = reply["recommendation"] as? JSON ?? [:]
             if !preserveDraft {
                 self.mode.selectItem(at: (completed ? settings["mode"] as? String == "cloud" : self.initialCloud) ? 1 : 0)
+                self.callsEnabled.state = (settings["calls_enabled"] as? Bool ?? true) ? .on : .off
+                self.cloudConsent.state = settings["cloud_consent"] as? Bool == true ? .on : .off
+                self.autoConsent.state = settings["auto_cloud_consent"] as? Bool == true ? .on : .off
                 self.autoProcess.state = settings["auto_process"] as? Bool == true ? .on : .off
                 let chosenModel = completed ? settings["call_model"] as? String : recommendation["call_model"] as? String
                 self.callModel.selectItem(at: chosenModel == "nemotron" ? 1 : 0)
@@ -254,7 +293,7 @@ final class SetupWindow: NSObject {
             let recommendedModel = recommendation["call_model"] as? String ?? "unknown"
             self.detail.stringValue = "Hardware: \(chip), \(memory), \(disk). Recommended call model: \(recommendedModel) (provisional). \(reason)\nModel availability: \(models)"
             self.result.stringValue = preserveDraft ? "Model preparation complete." : (completed ? "Settings loaded." : "Choose a mode and apply settings to start.")
-            completion?(settings)
+            completions.forEach { $0(settings) }
         }
     }
 
@@ -266,16 +305,20 @@ final class SetupWindow: NSObject {
         autoConsent.state = .off
         updateModeVisibility()
     }
+    @objc private func callsChanged() { updateModeVisibility(); updatePermissionStatus() }
     private func updateModeVisibility() {
         let cloud = mode.indexOfSelectedItem == 1
+        let calls = callsEnabled.state == .on
+        callViews.forEach { $0.isHidden = !calls }
         localViews.forEach { $0.isHidden = cloud }
         cloudViews.forEach { $0.isHidden = !cloud }
         cloudConsent.isHidden = !cloud
-        autoConsent.isHidden = !cloud || autoProcess.state != .on
+        autoConsent.isHidden = !calls || !cloud || autoProcess.state != .on
         autoProcess.title = cloud ? "Automatically transcribe and summarize completed calls" : "Automatically transcribe completed calls"
     }
     private func updatePermissionStatus() {
-        permissionStatus.stringValue = permissions()
+        let text = permissions()
+        permissionStatus.stringValue = callsEnabled.state == .on ? text : text.replacingOccurrences(of: " System audio access is checked when recording starts.", with: "")
     }
     @objc private func openModelTerms() {
         NSWorkspace.shared.open(URL(string: "https://huggingface.co/pyannote/speaker-diarization-community-1")!)
@@ -283,7 +326,7 @@ final class SetupWindow: NSObject {
 
     private var selectedCallModel: String { callModel.indexOfSelectedItem == 1 ? "nemotron" : "qwen" }
     private func begin() -> Bool {
-        guard !working else { return false }
+        guard !working && !refreshing else { return false }
         working = true
         applyButton.isEnabled = false
         return true
@@ -292,19 +335,20 @@ final class SetupWindow: NSObject {
         working = false
         applyButton.isEnabled = loaded
         result.stringValue = reply["ok"] as? Bool == true ? success : (reply["error"] as? String ?? "Request failed.")
+        startRefreshIfNeeded()
     }
     @objc private func apply() {
-        guard loaded, !working else { return }
+        guard loaded, !working, !refreshing else { return }
         let cloud = mode.indexOfSelectedItem == 1
         let automatic = autoProcess.state == .on
         guard !cloud || cloudConsent.state == .on else { result.stringValue = "Cloud mode requires explicit consent to provider processing and charges."; return }
-        guard !cloud || !automatic || autoConsent.state == .on else { result.stringValue = "Automatic cloud processing requires separate consent."; return }
+        guard !cloud || callsEnabled.state != .on || !automatic || autoConsent.state == .on else { result.stringValue = "Automatic cloud processing requires separate consent."; return }
         guard begin() else { return }
         guard onApplying?(true) != false else {
-            finish(["ok": false, "error": "Finish the current dictation or pending action before applying settings."], success: "")
+            finish(["ok": false, "error": "Finish current work or wait for the background process to be ready before applying settings."], success: "")
             return
         }
-        let request: JSON = ["action": "configure", "mode": cloud ? "cloud" : "local", "auto_process": automatic,
+        let request: JSON = ["action": "configure", "mode": cloud ? "cloud" : "local", "auto_process": automatic, "calls_enabled": callsEnabled.state == .on,
                              "call_model": selectedCallModel, "cleanup_model": cleanupModel.stringValue,
                              "cloud_consent": cloudConsent.state == .on, "auto_cloud_consent": autoConsent.state == .on,
                              "allow_unsafe_nemotron": unsafeModel.state == .on, "completed": true]
@@ -326,7 +370,7 @@ final class SetupWindow: NSObject {
     @objc private func prepare() {
         guard begin() else { return }
         result.stringValue = "Preparing models…"
-        var request: JSON = ["action": "prepare_models", "call_model": selectedCallModel, "cleanup_model": cleanupModel.stringValue,
+        var request: JSON = ["action": "prepare_models", "call_model": selectedCallModel, "cleanup_model": cleanupModel.stringValue, "calls_enabled": callsEnabled.state == .on,
                              "allow_unsafe_nemotron": unsafeModel.state == .on]
         if !hfToken.stringValue.isEmpty { request["hf_token"] = hfToken.stringValue; hfToken.stringValue = "" }
         DaemonProcess.setup(request) { [weak self] reply in

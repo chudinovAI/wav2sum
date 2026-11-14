@@ -9,12 +9,12 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 from audio_fakes import FakeVAD
+from daemon_client import DaemonClient, DaemonError
 
 from wav2sum import daemon
 from wav2sum.autorecord import CallDetector
 from wav2sum.calls import Speakers
 from wav2sum.capture import CaptureError
-from wav2sum.client import DaemonClient, DaemonError
 from wav2sum.config import Config
 from wav2sum.dictation import Dictation
 from wav2sum.history import append_dictation, load_dictations
@@ -52,6 +52,66 @@ def _daemon(tmp_path, monkeypatch, inputs: asyncio.Queue):
     d = daemon.Daemon(Config(recordings_dir=tmp_path, output_dir=tmp_path / "output"))
     d.loop, d.queue, d.ready = asyncio.get_running_loop(), asyncio.Queue(), asyncio.Event()
     return d
+
+
+def test_disabled_calls_reject_before_effects_and_keep_dictation_history(tmp_path, monkeypatch):
+    async def scenario():
+        d = _daemon(tmp_path, monkeypatch, asyncio.Queue())
+        d.cfg.calls_enabled = False
+        d.cfg.cloud = True
+        d.ready.set()
+        monkeypatch.setattr(daemon, "list_calls", lambda *_a: pytest.fail("scanned calls"))
+        monkeypatch.setattr(daemon, "new_recording_path", lambda *_a: pytest.fail("created recording path"))
+        monkeypatch.setattr(d, "_last_meeting", lambda: pytest.fail("scanned meetings"))
+        append_dictation({"time": "t", "text": "dictated", "raw": "dictated"}, daemon.HISTORY_PATH)
+        for request in (
+            {"cmd": "record_start"},
+            {"cmd": "record_stop"},
+            {"cmd": "process", "path": str(tmp_path / "missing.wav")},
+            {"cmd": "summarize_last_meeting"},
+        ):
+            with pytest.raises(ValueError, match="disabled"):
+                await d._handle(request, None)
+        history = await d._handle({"cmd": "history", "cloud": True}, None)
+        assert history["calls"] == []
+        assert history["dictations"][0]["text"] == "dictated"
+        assert d.status()["calls_enabled"] is False
+        assert d.queue.empty()
+
+    asyncio.run(scenario())
+
+
+def test_disabled_calls_do_not_spawn_watcher_or_cloud_summary_provider(tmp_path, monkeypatch, socket_path):
+    async def scenario():
+        d = _daemon(tmp_path, monkeypatch, asyncio.Queue())
+        d.cfg.calls_enabled = False
+
+        async def not_running():
+            return False
+
+        async def warm():
+            d.ready.set()
+
+        async def watch():
+            pytest.fail("spawned call watcher")
+
+        monkeypatch.setattr(daemon, "is_running", not_running)
+        monkeypatch.setattr(daemon, "SOCKET_PATH", socket_path)
+        monkeypatch.setattr(d, "_warm_up", warm)
+        monkeypatch.setattr(d, "_watch_calls", watch)
+        monkeypatch.setattr(d.dictator.llm, "unload", lambda: None)
+        running = asyncio.create_task(d.run())
+        while not socket_path.exists():
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0)
+        d.stopping.set()
+        await running
+
+    asyncio.run(scenario())
+    cfg = Config(calls_enabled=False)
+    cfg.cloud = True
+    monkeypatch.setattr(daemon, "OpenAILLM", lambda *_a, **_k: pytest.fail("created call summary provider"))
+    assert daemon.Daemon(cfg).summary_llm is None
 
 
 def test_call_is_recorded_from_start_to_end(tmp_path, monkeypatch):
@@ -214,12 +274,14 @@ def test_client_talks_to_daemon_over_the_socket(tmp_path, monkeypatch, socket_pa
     asyncio.run(scenario())
 
 
-def test_dictation_reaches_history_and_subscribers(tmp_path, monkeypatch, socket_path):
+@pytest.mark.parametrize("calls_enabled", [True, False])
+def test_dictation_reaches_history_and_subscribers(tmp_path, monkeypatch, socket_path, calls_enabled):
     history = []
     monkeypatch.setattr(daemon, "append_dictation", history.append)
 
     async def scenario():
         d = _daemon(tmp_path, monkeypatch, asyncio.Queue())
+        d.cfg.calls_enabled = calls_enabled
         d.ready.set()
         heard = []
 

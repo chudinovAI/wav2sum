@@ -1,8 +1,6 @@
 # wav2sum
 
-Call recording and voice dictation for macOS, with an offline-by-default local mode and explicit `--cloud` mode. Russian and English.
-
-![wav2sum tui](docs/tui.jpg)
+Call recording and voice dictation for macOS through a native GUI, with an offline-by-default local mode and explicitly selected Cloud mode. Russian and English.
 
 ## Installing the internal app
 
@@ -38,6 +36,13 @@ recording status is unknown until the app reconnects; another recording cannot b
 Use **Open wav2sum** in the menu bar to reopen a closed window. Normal launches show it after completed setup;
 dev-watch handoffs do not bring it forward automatically.
 
+In **Settings**, clear **Enable call recording and processing**, then press **Apply Settings** for dictation-only use.
+This saves your choice, disables call detection and actions in the background process, and hides call controls/history.
+Check it again and apply to restore calls. Existing recordings, results and downloaded models are never removed.
+Changing it requires idle recording, dictation, loading and processing; pending work is not interrupted.
+With calls disabled, explicit Local model preparation downloads only Qwen and Gemma; it does not require Nemotron
+memory overrides, pyannote access or System Audio permission. Dictation still needs its own microphone/hotkey/paste permissions.
+
 The **Calls** and **Dictations** tabs show read-only history from the connected background process.
 Select a raw call and press **Process Recording** to queue it explicitly; in Cloud the button is labelled
 **Process Recording (Cloud)** and uses the already consented provider mode. Queued/running recordings cannot be
@@ -52,9 +57,9 @@ permission status. Permissions still require explicit actions in Settings; an in
 Open **Settings…** from the main window or menu bar (**⌘,** in the main window). The grouped form scrolls while
 **Apply** stays visible. Mode/model changes are refused during recording, dictation, model loading or queued/running
 processing. Accepted changes coordinate an idle daemon restart; no process is forcibly killed.
-App choices live in `~/Library/Application Support/wav2sum/app-settings.json`. Only an explicitly chosen app mode
-is remembered; CLI processing still requires `--cloud`. An app `--cloud` launch conflicting with saved local mode
-opens the mode choice rather than silently ignoring the flag or switching an active daemon.
+App choices live in `~/Library/Application Support/wav2sum/app-settings.json`, including the explicitly selected mode
+and calls switch. Existing settings without the switch keep calls enabled. There is no user-facing CLI or TUI;
+the private `serve`/`setup` bootstrap remains only for communication between the app and its Python runtime.
 
 **Share Reviewed Examples…** opens a read-only view of dictations and learned edits. Filter, **Select All Shown**
 or clear selection, edit targets, and explicitly confirm every selected target. Changing a target clears its
@@ -65,15 +70,15 @@ before manually sharing the file; seven-day history retention does not remove an
 
 ## Local and cloud modes
 
-| | Default local | Explicit `--cloud` |
+| | Default local | Explicitly selected Cloud |
 |---|---|---|
 | Dictation ASR | Qwen3-ASR 1.7B | Deepgram Nova-3 |
 | Dictation cleanup, commands, translation | Local Gemma | OpenAI `gpt-6-luna`, Fast |
 | Call transcription | Qwen or Nemotron 30B IQ4_NL, on demand | Deepgram Nova-3 with timestamps and speakers |
 | Call summary and chapters | Disabled | OpenAI `gpt-6.1-terra` |
 
-`--cloud` authorizes sending audio to Deepgram and text to OpenAI. It is a process/command flag, never saved in
-`config.toml`. There is no automatic switch between modes or providers on errors. Ordinary dictation cleanup may
+Selecting Cloud and confirming consent authorizes sending audio to Deepgram and text to OpenAI. The choice lives in
+app settings, not `config.toml`. There is no automatic switch between modes or providers on errors. Ordinary dictation cleanup may
 retain the raw ASR text if cleanup fails, as before; translation failures do not paste untranslated text.
 Cloud dictation starts one chunked Deepgram HTTP upload with the first audio and sends PCM while you speak.
 Releasing the key sends the remaining tail and EOF; only the complete HTTP response becomes the transcript.
@@ -103,37 +108,16 @@ without direct preconnect or connection reuse. `unload` and owner shutdown close
 pending preconnect results; DNS/connect may finish later, but cannot publish a late socket into the client.
 
 Cloud credentials are stored in macOS Keychain (`service=wav2sum.cloud`), not `config.toml` or logs.
-Set them up once with hidden input:
-
-```fish
-uv run --offline --no-sync wav2sum cloud-keys
-```
-
-If `DEEPGRAM_API_KEY` / `OPENAI_API_KEY` are already exported in that terminal, setup saves those values without
-asking again. Otherwise it requests each missing key without echoing it; cancellation or empty input before saving
-leaves existing items unchanged. Run setup again to rotate keys. Environment variables override Keychain at runtime
-for explicit shell/CI use. Local processing never accesses Keychain.
+Enter both keys in the secure fields in **Settings → Cloud Credentials**, then press **Save Cloud Keys**.
+Leave the fields blank to keep existing keys. Environment variables override Keychain at runtime for explicit
+development/CI use. Local processing never accesses Keychain.
 Provider usage is billable and subject to each provider's data-handling policies.
 
-```fish
-uv run --offline --no-sync wav2sum --cloud meeting.mp3
-uv run --offline --no-sync wav2sum dictate --cloud phrase.wav
-uv run --offline --no-sync wav2sum tui --cloud
-```
-
-Use app Settings for a coordinated idle mode switch. For a manually managed CLI daemon, stop it while idle
-before changing its flag; an already running app does not accept mode changes through `open --args`.
-After Keychain setup, a CLI-only cloud daemon can be started from a terminal:
-
-```fish
-uv run --offline --no-sync wav2sum serve --cloud
-```
-
-Then, in another terminal, `wav2sum app --cloud` attaches the menu bar app in the same mode. Keychain credentials
-also work when Finder/Launch Services does not inherit shell exports. Locked/denied Keychain access fails clearly;
-background processing never opens an authentication prompt. Unlock Keychain and rerun setup if macOS denies access.
+Use **Settings** for a coordinated idle mode switch. Keychain credentials also work when Finder/Launch Services
+does not inherit shell exports. Locked/denied Keychain access fails clearly; background processing never opens an
+authentication prompt. Unlock Keychain and retry the explicit Settings action if macOS denies access.
 A client/daemon mode mismatch disables processing rather than uploading through the other mode.
-The selected mode is visible in TUI and the menu bar menu; `wav2sum status` reports it too.
+The selected mode is visible in the main window and menu bar.
 
 ## Usage
 
@@ -153,12 +137,11 @@ The selected mode is visible in TUI and the menu bar menu; `wav2sum status` repo
   the result replaces the selection.
 - **Dictate in English.** Hold ⌃ + right ⌥ and speak Russian or English; clean English text is pasted at the cursor.
   If the selected LLM fails, nothing is pasted and you hear a beep.
-- **Calls.** Recording starts by itself when Zoom, Teams, or Webex takes the microphone and stops once the call ends.
+- **Calls.** When enabled, recording starts by itself when Zoom, Teams, or Webex takes the microphone and stops once the call ends.
   To record anything else, use **Start Call Recording** in the main window (or menu bar), then **Stop Recording**.
   Recordings are saved automatically. By default, stopping a recording or starting the background process does not enqueue processing;
   the explicit automatic-processing setting applies only after a successful stop, never retrospectively at startup.
-  Otherwise select the raw call in the main window and press **Process Recording**, or use
-  `wav2sum tui` (with `--cloud` when selected), select the raw call and press `p`.
+  Otherwise select the raw call in the main window and press **Process Recording**.
   Local mode creates a transcript and metadata; cloud also creates summary/chapters. Results use the configured output directory.
   Cloud summary points cite source utterances, for example `[U2 00:01–00:02]`; fabricated, hidden or missing
   references are rejected. Long monologues are split without inventing finer timestamps, and reduction keeps
@@ -166,8 +149,7 @@ The selected mode is visible in TUI and the menu bar menu; `wav2sum status` repo
   Local call windows join nearby speech up to 20 seconds (Qwen) or 50 seconds (Nemotron), without crossing speaker
   changes; overlapping or uncovered diarization remains unattributed. Spoken self-corrections stay in the transcript.
   The daemon rejects processing an active or finalizing recording, a duplicate queued or running job, ambiguous
-  recordings with the same filename stem, or an existing output directory, including partial output. These safeguards
-  apply to daemon requests, not direct CLI processing outside the daemon.
+  recordings with the same filename stem, or an existing output directory, including partial output.
   If capture fails while stopping, the daemon clears the recording state and leaves any partial WAV in place.
 - **Summarize Last Meeting.** In cloud mode, use this menu-bar action for the most recent completed recording
   owned by wav2sum. Recording start time takes precedence over result-file modification time. A raw recording is
@@ -182,19 +164,13 @@ The selected mode is visible in TUI and the menu bar menu; `wav2sum status` repo
   Russian or English cleanup/summary prompt. Explicit `language = "ru"` or `"en"` sets the recognition and text language.
   The tested Nemotron worker validates a `language` option but does not use it to constrain recognition; for that
   backend an explicit language selects the output/summary language, not a guaranteed recognition restriction.
-- **History and summaries.** Run `wav2sum tui`. Press `x` on a processed call or a dictation to delete it; calls go to
-  the Trash. Raw recordings cannot be deleted from the TUI.
+- **History and summaries.** Open the main window's **Calls** or **Dictations** history. The GUI is read-only.
   Dictation history older than seven days is permanently removed at daemon startup and then hourly, including
-  history accumulated before this version. The TUI refreshes after cleanup. Vocabulary, learned-edit examples
+  history accumulated before this version. The GUI refreshes after cleanup. Vocabulary, learned-edit examples
   (`edits.jsonl`), call recordings and call results are not pruned. Entries with unknown or timezone-naive dates
   are retained; malformed history or a write failure leaves the original file unchanged.
-- **An existing file.** Run `wav2sum meeting.mp3`.
 
-After updating an existing installation, quit the old menu-bar app first, then run:
-
-```fish
-uv run --offline --no-sync wav2sum app --cloud
-```
+After updating an existing installation, quit the old menu-bar app first, then open the updated **Wav2Sum.app**.
 
 **Starting the updated daemon activates the seven-day rule on existing dictation history.** This history removal
 is irreversible; it does not move individual entries to the Trash.
@@ -207,7 +183,7 @@ is irreversible; it does not move individual entries to the Trash.
 me = "Андрей"
 them = "Илья"
 language = "auto"  # or "ru" / "en"
-summary_model = "gpt-6.1-terra"  # cloud call summary only; --model overrides it for CLI processing
+summary_model = "gpt-6.1-terra"  # cloud call summary only
 auto_record = true
 call_apps = ["us.zoom", "com.microsoft.teams2", "Cisco-Systems.Spark"]  # bundle id prefixes
 
@@ -233,8 +209,9 @@ Mixed Cyrillic/Latin tokens can use a supplied spelling only when exact translit
 ### Checkout environment
 
 ```fish
-uv tool install -e .
-wav2sum app
+uv sync
+uv run --offline --no-sync python -c 'from wav2sum.build import install_app; print(install_app())'
+open ~/Applications/Wav2Sum.app
 ```
 
 Local dictation cleanup runs in-process on MLX with `mlx-community/gemma-4-E4B-it-qat-4bit`, explicitly prepared
@@ -253,23 +230,15 @@ yourself, then prepare it with a Hugging Face token. Setup uses the token in mem
 pinned prepared snapshot loads without the token; existing HF authentication is also supported. Pyannote telemetry
 is disabled. An unavailable local model never causes cloud fallback.
 
-`wav2sum app` installs the development app and opens its menu icon. Complete Settings on first launch, including
-explicit permission actions. This development bundle still depends on its project environment.
-
-If the app is already installed from this checkout, keep using its existing project environment:
-
-```fish
-uv run --offline --no-sync wav2sum app
-uv run --offline --no-sync wav2sum status
-```
-
-Run these commands from the repository. The app stores the Python interpreter path in its bundle; switching between
-this `.venv` and the global `uv tool` environment rebuilds the app. `status` only reads the background process state.
-Starting the app enables the configured call detection and model warmup, so use `status` when you only need to check it.
+The explicit developer install command above builds the development app; open the resulting bundle normally.
+Complete Settings on first launch, including explicit permission actions. This development bundle still depends
+on its project environment. Keep using the same checkout and `.venv`: the bundle stores its Python interpreter path.
+Starting the app starts configured model warmup and, only when calls are enabled, configured call detection.
+Inspect the main window without launching a second app or manually starting another daemon.
 
 ### Development watch
 
-`app --watch` is an explicit development-only watcher for `~/Applications/Wav2Sum.app`, not the standalone friend
+`devwatch.run` is an explicit development-only watcher for `~/Applications/Wav2Sum.app`, not the standalone friend
 bundle. It watches the native app and icon Swift files, builds a signed candidate, and switches only after the current
 hotkey, dictation, insertion probe, correction tracking, and correction acknowledgement have finished. A single edit
 can take about 210 seconds to locate and follow; further dictations or an unconfirmed correction can extend the wait
@@ -291,10 +260,10 @@ bundle contains a signed source digest to detect stale builds without changing i
 and Python environment, start it with:
 
 ```fish
-uv run --offline --no-sync wav2sum app --watch --cloud
+uv run --offline --no-sync python -c 'from wav2sum.devwatch import run; run(cloud=True)'
 ```
 
-Use `--cloud` only for the explicitly chosen cloud mode; omit it for local. Keep that terminal open and do not launch
+Pass `cloud=True` only for the explicitly chosen Cloud mode; use `cloud=False` for Local. Keep that terminal open and do not launch
 another Wav2Sum app or installer in parallel. If the daemon is off, choose **Turn On Background Process** explicitly.
 **Warning:** starting a daemon applies the seven-day deletion policy to existing dictation history. Ctrl-C waits for
 current dictation and corrections, then closes only the owned dev app; the daemon keeps running. An in-flight control
@@ -322,7 +291,7 @@ uv run pytest --cov && uv run ruff check && uv run ruff format --check
 macOS ties privacy permissions to the app's signature. By default the app is signed ad hoc, so every rebuild after an
 update asks for them again. To keep them, create a signing certificate once: Keychain Access → Certificate Assistant →
 Create a Certificate…, name `wav2sum`, identity type Self-Signed Root, certificate type Code Signing. Then run
-`wav2sum app` and grant the permissions one last time.
+the explicit developer install command above and grant the permissions one last time.
 
 ### Building an internal standalone app
 

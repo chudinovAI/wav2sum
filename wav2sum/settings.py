@@ -52,6 +52,7 @@ def _status() -> dict:
         values = {
             "completed": False,
             "mode": "local",
+            "calls_enabled": True,
             "auto_process": False,
             "call_model": recommended["call_model"],
             "cleanup_model": CLEANUP_MODEL,
@@ -64,7 +65,11 @@ def _status() -> dict:
         "settings": values,
         "hardware": hardware,
         "recommendation": recommended,
-        "models": model_status(values["call_model"], values["cleanup_model"]),
+        "models": (
+            model_status(values["call_model"], values["cleanup_model"])
+            if values.get("calls_enabled", True)
+            else model_status(values["call_model"], values["cleanup_model"], False)
+        ),
         "bundled_cloud_keys": has_bundled_credentials(),
     }
 
@@ -98,14 +103,16 @@ def handle(request: dict) -> dict:
             cleanup_model = request.get("cleanup_model", CLEANUP_MODEL)
             if call_model not in ("qwen", "nemotron") or cleanup_model != CLEANUP_MODEL:
                 raise SettingsError("Choose a supported local model configuration")
+            calls_enabled = request.get("calls_enabled", True)
             allow_unsafe = request.get("allow_unsafe_nemotron", False)
-            if type(allow_unsafe) is not bool:
-                raise SettingsError("The memory warning override must be a boolean")
-            check_memory(call_model, allow_unsafe=allow_unsafe)
+            if type(calls_enabled) is not bool or type(allow_unsafe) is not bool:
+                raise SettingsError("Calls enabled and memory warning override must be booleans")
+            if calls_enabled:
+                check_memory(call_model, allow_unsafe=allow_unsafe)
             token = request.get("hf_token")
             if token is not None and (not isinstance(token, str) or not token.strip()):
                 raise SettingsError("Hugging Face token must be nonempty when provided")
-            result = prepare_models(call_model, cleanup_model, hf_token=token)
+            result = prepare_models(call_model, cleanup_model, hf_token=token, calls_enabled=calls_enabled)
             return {"ok": True, "models": result}
         case "examples":
             from wav2sum.sharing import list_examples

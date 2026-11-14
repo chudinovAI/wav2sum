@@ -473,7 +473,7 @@ def _relocation_check(app: Path, home: Path) -> None:
 import os, pathlib, sys
 root = pathlib.Path(sys.executable).resolve().parent.parent
 assert all(not p or pathlib.Path(p).resolve().is_relative_to(root) for p in sys.path), sys.path
-import wav2sum.cli, wav2sum.daemon, wav2sum.cloud, wav2sum.asr, wav2sum.models
+import wav2sum.__main__, wav2sum.daemon, wav2sum.cloud, wav2sum.asr, wav2sum.models
 import wav2sum.local_models, wav2sum.settings, wav2sum.sharing
 import torch, torchaudio, transformers, pyannote.audio, mlx_lm
 from wav2sum.build import capture_helper

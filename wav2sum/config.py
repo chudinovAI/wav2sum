@@ -47,6 +47,7 @@ class Config:
     mic: str | None = None
     recordings_dir: Path = Path("~/wav2sum/recordings")
     output_dir: Path = Path("~/wav2sum/output")
+    calls_enabled: bool = True
     auto_record: bool = True
     auto_process: bool = False
     call_model: str = "nemotron"
@@ -57,6 +58,8 @@ class Config:
     auto_cloud_consent: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self):
+        if type(self.calls_enabled) is not bool:
+            raise ValueError("calls_enabled must be a boolean")
         self.recordings_dir = Path(self.recordings_dir).expanduser()
         self.output_dir = Path(self.output_dir).expanduser()
 
@@ -139,8 +142,8 @@ def _validate_choices(values: dict) -> None:
         raise SettingsError("Choose Qwen or Nemotron for local calls")
     if values["cleanup_model"] != CLEANUP_MODEL:
         raise SettingsError("Choose the supported local cleanup model")
-    for key in ("auto_process", "cloud_consent", "auto_cloud_consent", "allow_unsafe_nemotron"):
-        if type(values.get(key, False)) is not bool:
+    for key in ("auto_process", "cloud_consent", "auto_cloud_consent", "allow_unsafe_nemotron", "calls_enabled"):
+        if type(values.get(key, key == "calls_enabled")) is not bool:
             raise SettingsError("Consent and processing choices must be booleans")
 
 
@@ -158,9 +161,14 @@ def validate_settings(values: dict) -> dict:
     if values["mode"] == "cloud":
         if values.get("cloud_consent") is not True:
             raise SettingsError("Cloud requires explicit consent to provider transfers and charges")
-        if values["auto_process"] and values.get("auto_cloud_consent") is not True:
+        if (
+            values.get("calls_enabled", True)
+            and values["auto_process"]
+            and values.get("auto_cloud_consent") is not True
+        ):
             raise SettingsError("Automatic cloud call processing requires separate consent")
     result = {key: values[key] for key in required}
+    result["calls_enabled"] = values.get("calls_enabled", True)
     for key in ("cloud_consent", "auto_cloud_consent"):
         result[key] = values.get(key, False)
     if "allow_unsafe_nemotron" in values:
@@ -213,6 +221,7 @@ def apply_preferences(cfg, preferences: dict) -> None:
     """App choices affect processing, never implicitly set a CLI's cloud flag."""
     if not preferences:
         return
+    cfg.calls_enabled = preferences.get("calls_enabled", True)
     cfg.auto_process = preferences["auto_process"]
     cfg.call_model = preferences["call_model"]
     cfg.allow_unsafe_nemotron = preferences.get("allow_unsafe_nemotron", False)

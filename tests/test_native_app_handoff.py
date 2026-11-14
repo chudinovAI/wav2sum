@@ -64,18 +64,39 @@ typealias JSON = [String: Any]
 enum FocusedApp { static func ensureAccessibility(prompt: Bool) -> Bool { false } }
 enum DaemonProcess {
     static var calls: [String] = []
+    static var requests: [JSON] = []
+    static var savedAuto = false
+    static var savedCalls = true
+    static var deferNextStatus = false
+    static var pendingStatus: ((JSON) -> Void)?
     static var pending: ((JSON) -> Void)?
     static func setup(_ request: JSON, completion: @escaping (JSON) -> Void) {
         let action = request["action"] as! String
+        requests.append(request)
         calls.append(action)
-        if action == "status" { completion(["ok": true, "settings": ["completed": true, "mode": "local"]]) }
+        if action == "status" {
+            let response: JSON = ["ok": true, "settings": [
+                "completed": true, "mode": "local", "auto_process": savedAuto, "call_model": "qwen",
+                "cleanup_model": "saved-cleanup", "cloud_consent": true, "auto_cloud_consent": true,
+                "allow_unsafe_nemotron": false, "calls_enabled": savedCalls]]
+            if deferNextStatus { deferNextStatus = false; pendingStatus = { _ in completion(response) } }
+            else { completion(response) }
+        }
         else { pending = completion }
     }
 }
 func descendants(_ view: NSView) -> [NSView] { [view] + view.subviews.flatMap(descendants) }
 _ = NSApplication.shared
 let setup = SetupWindow(initialCloud: false, permissions: { "synthetic permissions" })
-setup.refresh()
+DaemonProcess.deferNextStatus = true
+var bootstrapCompleted = false
+var secondCompleted = false
+setup.refresh { _ in bootstrapCompleted = true }
+setup.refresh { _ in secondCompleted = true }
+precondition(DaemonProcess.calls == ["status"] && !bootstrapCompleted && !secondCompleted,
+             "concurrent refreshes must share one helper request")
+DaemonProcess.pendingStatus?([:])
+precondition(bootstrapCompleted && secondCompleted, "all initial refresh completions must run")
 let window = NSApp.windows.first {
     $0.contentView.map(descendants)?.contains { $0.identifier?.rawValue == "settings.apply" } == true
 }!
@@ -118,6 +139,36 @@ apply.performClick(nil)
 precondition(DaemonProcess.calls == ["status", "configure"] && !apply.isEnabled)
 DaemonProcess.pending?(["ok": false, "error": "synthetic failed ACK"])
 precondition(transitions == [true, true, false] && apply.isEnabled)
+let calls = find("settings.callsEnabled", NSButton.self)
+calls.performClick(nil)
+precondition(calls.state == .off)
+apply.performClick(nil)
+precondition(DaemonProcess.requests.last?["calls_enabled"] as? Bool == false)
+let count = DaemonProcess.calls.count
+var refreshCompleted = false
+setup.refresh { _ in refreshCompleted = true }
+precondition(DaemonProcess.calls.count == count && !refreshCompleted,
+             "refresh requested during Apply must wait for its ACK")
+DaemonProcess.savedCalls = false
+DaemonProcess.savedAuto = true
+DaemonProcess.pending?(["ok": true, "settings": [
+    "completed": true, "mode": "local", "calls_enabled": false], "restart": false])
+precondition(refreshCompleted && calls.state == .off,
+             "queued refresh must read the saved value after Apply")
+precondition(find("settings.callModel", NSPopUpButton.self).isHidden && automatic.isHidden && automaticConsent.isHidden)
+let prepare = find("settings.prepareModels", NSButton.self)
+prepare.performClick(nil)
+precondition(DaemonProcess.requests.last?["action"] as? String == "prepare_models")
+precondition(DaemonProcess.requests.last?["calls_enabled"] as? Bool == false)
+DaemonProcess.pending?(["ok": false, "error": "synthetic preparation failure"])
+mode.selectItem(at: 1)
+_ = mode.sendAction(mode.action!, to: mode.target)
+consent.state = .on
+apply.performClick(nil)
+precondition(DaemonProcess.requests.last?["action"] as? String == "configure")
+precondition(DaemonProcess.requests.last?["calls_enabled"] as? Bool == false)
+precondition(DaemonProcess.requests.last?["auto_process"] as? Bool == true)
+precondition(DaemonProcess.requests.last?["auto_cloud_consent"] as? Bool == false)
 print("native settings preflight tests passed")
 """
     )

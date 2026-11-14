@@ -5,11 +5,9 @@ https://developer.apple.com/documentation/security/secitemcopymatching(_:_:)
 """
 
 import ctypes
-import getpass
 import json
 import os
 import sys
-import warnings
 from contextlib import ExitStack, contextmanager
 from functools import cache
 from pathlib import Path
@@ -53,31 +51,7 @@ def credential(name: str) -> str:
         return value.strip()
     if value := _bundled_credentials().get(name):
         return value
-    raise RuntimeError(f"{name} is not configured; run 'wav2sum cloud-keys' or export {name}")
-
-
-def configure() -> None:
-    """Explicit one-time setup; gather both values before changing either item."""
-    values = {}
-    for name, provider in PROVIDERS.items():
-        value = os.environ.get(name, "").strip()
-        if not value:
-            if not sys.stdin.isatty():
-                raise RuntimeError("Run wav2sum cloud-keys in an interactive terminal for hidden input")
-            with warnings.catch_warnings():
-                warnings.simplefilter("error", getpass.GetPassWarning)
-                try:
-                    value = getpass.getpass(f"{provider} API key (hidden): ").strip()
-                except getpass.GetPassWarning:
-                    raise RuntimeError("Secure hidden input is unavailable; no keys were saved") from None
-        if not value:
-            raise ValueError(f"Empty {provider} API key; existing Keychain items were not changed")
-        values[name] = value
-    keychain = Keychain(allow_interaction=True)
-    for name, value in values.items():
-        keychain.set(name, value)
-        print(f"{PROVIDERS[name]}: saved in macOS Keychain")
-    print("Cloud keys are available to new terminals and the menu bar app. Restart an idle cloud daemon.")
+    raise RuntimeError(f"{name} is not configured; add it in Wav2Sum Settings or export {name}")
 
 
 @cache
@@ -166,9 +140,7 @@ class Keychain:
     @staticmethod
     def _check(status):
         if status:
-            raise RuntimeError(
-                f"Keychain access unavailable (status {status}); unlock Keychain and run wav2sum cloud-keys"
-            )
+            raise RuntimeError(f"Keychain access unavailable (status {status}); unlock Keychain")
 
     def get(self, name: str) -> str | None:
         result = ctypes.c_void_p()

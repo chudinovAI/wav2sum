@@ -3,6 +3,7 @@ import AppKit
 final class MainWindow: NSObject {
     struct State {
         let status: String
+        let callsEnabled: Bool
         let recording: String
         let elapsed: String
         let recordingActive: Bool
@@ -28,6 +29,8 @@ final class MainWindow: NSObject {
     private let recording = NSTextField(wrappingLabelWithString: "")
     private let elapsed = NSTextField(labelWithString: "00:00")
     private let record = NSButton(title: "Start Call Recording", target: nil, action: nil)
+    private let call = NSStackView()
+    private let callDivider = NSBox()
     private let background = NSButton(title: "", target: nil, action: nil)
     private let processing = NSTextField(wrappingLabelWithString: "")
     private let dictation = NSTextField(wrappingLabelWithString: "")
@@ -65,12 +68,17 @@ final class MainWindow: NSObject {
         record.font = .systemFont(ofSize: 14, weight: .semibold)
         record.imagePosition = .imageLeading
         record.setAccessibilityHelp("Record microphone and system audio. Processing follows your Settings.")
-        let call = NSStackView(views: [heading, elapsed, recording, record])
+        [heading, elapsed, recording, record].forEach { call.addArrangedSubview($0) }
         call.orientation = .vertical
         call.alignment = .leading
         call.spacing = 12
-        call.translatesAutoresizingMaskIntoConstraints = false
-        sidebar.addSubview(call)
+        let callHeader = NSStackView(views: [call])
+        callHeader.orientation = .vertical
+        callHeader.alignment = .leading
+        callHeader.spacing = 16
+        callHeader.translatesAutoresizingMaskIntoConstraints = false
+        sidebar.addSubview(callHeader)
+        call.widthAnchor.constraint(equalTo: callHeader.widthAnchor).isActive = true
         for view in [elapsed, recording, record] {
             view.widthAnchor.constraint(equalTo: call.widthAnchor).isActive = true
         }
@@ -78,11 +86,11 @@ final class MainWindow: NSObject {
 
         let dictationHeading = NSTextField(labelWithString: "Dictation")
         dictationHeading.font = .systemFont(ofSize: 13, weight: .semibold)
-        let firstDivider = NSBox(); firstDivider.boxType = .separator
+        callDivider.boxType = .separator
         let secondDivider = NSBox(); secondDivider.boxType = .separator
         let spacer = NSView()
         spacer.setContentHuggingPriority(.init(1), for: .vertical)
-        let information = NSStackView(views: [processing, message, firstDivider, dictationHeading,
+        let information = NSStackView(views: [processing, message, callDivider, dictationHeading,
                                              dictation, dictationMessage, permissions, secondDivider, status, spacer])
         information.orientation = .vertical
         information.alignment = .leading
@@ -137,10 +145,10 @@ final class MainWindow: NSObject {
             sidebar.topAnchor.constraint(equalTo: content.topAnchor),
             sidebar.bottomAnchor.constraint(equalTo: content.bottomAnchor),
             sidebar.widthAnchor.constraint(equalToConstant: 280),
-            call.topAnchor.constraint(equalTo: sidebar.topAnchor, constant: 24),
-            call.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 20),
-            call.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -20),
-            scroll.topAnchor.constraint(equalTo: call.bottomAnchor, constant: 20),
+            callHeader.topAnchor.constraint(equalTo: sidebar.topAnchor, constant: 24),
+            callHeader.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 20),
+            callHeader.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -20),
+            scroll.topAnchor.constraint(equalTo: callHeader.bottomAnchor, constant: 20),
             scroll.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor),
             scroll.bottomAnchor.constraint(equalTo: footerDivider.topAnchor, constant: -12),
@@ -171,7 +179,7 @@ final class MainWindow: NSObject {
         message.isSelectable = true
         dictationMessage.isSelectable = true
         status.isSelectable = true
-        window.initialFirstResponder = record
+        window.initialFirstResponder = settings
         window.center()
     }
 
@@ -179,6 +187,9 @@ final class MainWindow: NSObject {
         let changedMessage = message.stringValue != state.message
         let changedDictationMessage = dictationMessage.stringValue != state.dictationMessage
         status.stringValue = state.status
+        call.isHidden = !state.callsEnabled
+        processing.isHidden = !state.callsEnabled
+        callDivider.isHidden = !state.callsEnabled
         recording.stringValue = state.recording
         elapsed.stringValue = state.elapsed
         record.image = state.recordingActive ? stopImage : startImage
@@ -193,7 +204,7 @@ final class MainWindow: NSObject {
         dictationMessage.textColor = state.dictationIsError ? .systemRed : .labelColor
         message.stringValue = state.message
         message.textColor = state.messageIsError ? .systemRed : .labelColor
-        message.isHidden = state.message.isEmpty
+        message.isHidden = !state.callsEnabled || state.message.isEmpty
         dictationMessage.isHidden = state.dictationMessage.isEmpty
         message.setAccessibilityLabel(state.messageIsError ? "Recording error" : "Recording result")
         dictationMessage.setAccessibilityLabel(state.dictationIsError ? "Dictation error" : "Dictation result")
