@@ -3,10 +3,10 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from daemon_client import DaemonClient, DaemonError
 from test_daemon import _daemon, _serving
 
 from wav2sum import daemon
-from wav2sum.client import DaemonClient, DaemonError
 
 
 def test_history_rpc_reads_custom_paths_jobs_and_duplicates_without_writes(tmp_path, monkeypatch, socket_path):

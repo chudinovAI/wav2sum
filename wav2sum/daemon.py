@@ -80,7 +80,9 @@ class Daemon:
             language=cfg.language,
             examples=user_examples(load_dictations(EDITS_PATH)),
         )
-        self.summary_llm = OpenAILLM(cfg.summary_model, num_ctx=cfg.num_ctx) if cfg.cloud else None
+        self.summary_llm = (
+            OpenAILLM(cfg.summary_model, num_ctx=cfg.num_ctx) if cfg.cloud and cfg.calls_enabled else None
+        )
         self.recorder: CallRecorder | None = None
         self.auto_app: str | None = None
         self.recording_lock = asyncio.Lock()
@@ -117,7 +119,7 @@ class Daemon:
             asyncio.create_task(self._work()),
             asyncio.create_task(self._maintain_history()),
         ]
-        if self.cfg.auto_record:
+        if self.cfg.calls_enabled and self.cfg.auto_record:
             tasks.append(asyncio.create_task(self._watch_calls()))
         await self.stopping.wait()
 
@@ -238,6 +240,7 @@ class Daemon:
                 raise ValueError("Finish recording, dictation and processing before changing settings")
             restart = (
                 (values["mode"] == "cloud") != self.cfg.cloud
+                or values["calls_enabled"] != self.cfg.calls_enabled
                 or values["call_model"] != self.cfg.call_model
                 or values["cleanup_model"] != self.cfg.dictation.model
                 or values.get("allow_unsafe_nemotron", False) != self.cfg.allow_unsafe_nemotron
@@ -258,6 +261,13 @@ class Daemon:
     def _check_mode(self, request: dict) -> None:
         if self.reconfiguring:
             raise ValueError("Settings are changing; reconnect after the background process restarts")
+        if not self.cfg.calls_enabled and request.get("cmd") in {
+            "record_start",
+            "record_stop",
+            "process",
+            "summarize_last_meeting",
+        }:
+            raise ValueError("Call functionality is disabled")
         if request.get("cmd") not in {
             "subscribe",
             "history",
@@ -280,8 +290,9 @@ class Daemon:
             "version": __version__,
             "pid": os.getpid(),
             "cloud": self.cfg.cloud,
+            "calls_enabled": self.cfg.calls_enabled,
             "state": "ready" if self.ready.is_set() else "failed" if self.warm_up_error else "loading",
-            # The LLM now lives in this process, so the footprint already holds it; the app and TUI add the two up.
+            # The LLM now lives in this process, so the footprint already holds it; the app adds the two up.
             "memory_mb": _memory_mb() - llm_mb,
             "llm_memory_mb": llm_mb,
             "hotkey": self.cfg.dictation.hotkey,
@@ -298,8 +309,8 @@ class Daemon:
 
     async def _history(self) -> dict:
         calls, dictations = await asyncio.to_thread(self._read_history)
-        jobs = {str(Path(job.audio).resolve()): job for job in self.jobs}
-        active = str(self.recorder.path.resolve()) if self.recorder else None
+        jobs = {str(Path(job.audio).resolve()): job for job in self.jobs} if self.cfg.calls_enabled else {}
+        active = str(self.recorder.path.resolve()) if self.cfg.calls_enabled and self.recorder else None
         for call in calls:
             if job := jobs.get(call["audio"]):
                 call.update(state=job.state, stage=job.stage, error=job.error)
@@ -314,7 +325,7 @@ class Daemon:
 
     def _read_history(self) -> tuple[list[dict], list[dict]]:
         calls = []
-        for entry in list_calls(self.cfg.recordings_dir, self.cfg.output_dir):
+        for entry in list_calls(self.cfg.recordings_dir, self.cfg.output_dir) if self.cfg.calls_enabled else ():
             folder = entry.path if entry.meta is not None else None
             transcript = folder / "transcript.txt" if folder else None
             complete = transcript is not None and transcript.is_file()
@@ -491,6 +502,8 @@ class Daemon:
         return {"learned": learned}
 
     async def _record_start(self, auto: str | None = None) -> dict:
+        if not self.cfg.calls_enabled:
+            raise ValueError("Call functionality is disabled")
         async with self.recording_lock:
             if self.reconfiguring:
                 raise ValueError("Settings are changing; wait for the background process to restart")
@@ -509,6 +522,8 @@ class Daemon:
         return {"path": str(recorder.path)}
 
     async def _record_stop(self, *, manual: bool = False) -> dict:
+        if not self.cfg.calls_enabled:
+            raise ValueError("Call functionality is disabled")
         if manual and self.calls and self.calls.app:
             self.calls.dismiss()
         async with self.recording_lock:
@@ -676,6 +691,8 @@ class Daemon:
         return audio, self._existing_meeting_output(audio)
 
     async def _summarize_last_meeting(self) -> dict:
+        if not self.cfg.calls_enabled:
+            raise ValueError("Call functionality is disabled")
         if not self.cfg.cloud:
             raise ValueError("Meeting summaries are available only in cloud mode")
         async with self.recording_lock:
@@ -699,6 +716,8 @@ class Daemon:
             return {"job": asdict(job)}
 
     def _enqueue(self, audio: Path) -> Job:
+        if not self.cfg.calls_enabled:
+            raise ValueError("Call functionality is disabled")
         self._validate_processing(audio)
         job = Job(next(self.job_ids), str(audio))
         self.jobs.append(job)

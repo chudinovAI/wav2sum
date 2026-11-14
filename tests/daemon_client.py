@@ -1,3 +1,5 @@
+"""Socket client used by daemon integration tests."""
+
 import asyncio
 import base64
 import itertools
@@ -31,9 +33,7 @@ class DaemonClient:
         try:
             reader, writer = await asyncio.open_unix_connection(str(SOCKET_PATH), limit=MAX_MESSAGE)
         except (FileNotFoundError, ConnectionRefusedError):
-            raise DaemonUnavailable(
-                "the background process is not running (wav2sum serve or the menu bar app)"
-            ) from None
+            raise DaemonUnavailable("the background process is not running") from None
         return cls(reader, writer, cloud=cloud)
 
     async def request(self, cmd: str, **params) -> dict:

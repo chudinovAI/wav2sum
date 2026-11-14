@@ -16,6 +16,8 @@ final class DaemonClient {
     var history: JSON = ["ok": true, "calls": [JSON](), "dictations": [JSON]()]
     var deferHistory = false
     var historyReplies: [(JSON) -> Void] = []
+    var subscribed = false
+    func emit(_ event: JSON) { if subscribed { onEvent?(event) } }
     func connect(path: String) -> Bool { isConnected = connectResult; return connectResult }
     func disconnect() { isConnected = false }
     func request(_ cmd: String, _ params: JSON = [:], reply: ((JSON) -> Void)? = nil) {
@@ -27,13 +29,21 @@ final class DaemonClient {
             return
         }
         if cmd == "subscribe" || cmd == "status" {
-            reply?(["ok": true, "cloud": cloud, "state": "ready"].merging(snapshot) { _, new in new })
+            let actualCloud = snapshot["cloud"] as? Bool ?? cloud
+            if actualCloud != cloud {
+                if cmd == "subscribe" { subscribed = false }
+                reply?(["ok": false, "error": "daemon mode mismatch"])
+                return
+            }
+            if cmd == "subscribe" { subscribed = true }
+            reply?(["ok": true, "cloud": actualCloud, "state": "ready"].merging(snapshot) { _, new in new })
             return
         }
         if let reply { replies.append(reply) }
     }
     func acknowledge(_ reply: JSON = ["ok": true]) { replies.removeFirst()(reply) }
     func loseConnection() {
+        subscribed = false
         isConnected = false
         let callbacks = replies; replies.removeAll()
         callbacks.forEach { $0(["ok": false, "error": "connection lost"]) }
@@ -71,14 +81,19 @@ final class SetupWindow {
     static func permissionSummary() -> String { "synthetic permissions" }
     var completed = true
     var mode = "cloud"
-    func refresh(_ completion: (JSON?) -> Void) { completion(["completed": completed, "mode": mode]) }
+    var savedCallsEnabled = true
+    func refresh(_ completion: (JSON?) -> Void) { completion(["completed": completed, "mode": mode, "calls_enabled": savedCallsEnabled]) }
     func show(requestCloud: Bool = false) {}
 }
 final class SharingWindow { func show() {} }
 enum DaemonProcess {
     static let socketPath = "unused"
     static var starts = 0
-    static func start(cloud: Bool) { starts += 1 }
+    static var launchExit: (() -> Void)?
+    static func start(cloud: Bool, onExit: @escaping () -> Void) {
+        starts += 1
+        launchExit = onExit
+    }
 }
 enum Log { static let directory = "unused"; static func write(_ message: String) {} }
 enum Logo { static var menuBarImage: NSImage? { nil } }
@@ -117,6 +132,7 @@ struct AppHandoffTest {
         delegate = AppDelegate(devWatchMode: devWatchMode, effects: effects)
         delegate.setupWindow.completed = completed
         delegate.setupWindow.mode = cloud ? "cloud" : "local"
+        delegate.setupWindow.savedCallsEnabled = snapshot["calls_enabled"] as? Bool ?? true
         delegate.daemon.snapshot = snapshot
         delegate.daemon.deferHistory = deferHistory
         delegate.daemon.history.merge(history) { _, new in new }
@@ -128,6 +144,17 @@ struct AppHandoffTest {
     }
     static func main() {
         _ = NSApplication.shared
+        if CommandLine.arguments.contains("--preview") {
+            NSApp.setActivationPolicy(.regular)
+            let app = make(devWatchMode: false, snapshot: ["calls_enabled": !CommandLine.arguments.contains("--calls-off")],
+                           showWindow: true,
+                           history: ["dictations": [["id": "preview-dictation", "text": "Synthetic dictation history",
+                                                     "time": "Preview", "mode": "local", "raw": "Synthetic dictation history"]]])
+            app.mainWindow.window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            NSApp.run()
+            return
+        }
         if CommandLine.arguments.contains("--main-window") { MainWindowTest.run(); return }
         if CommandLine.arguments.contains("--history-view") { HistoryViewTest.run(); return }
         if CommandLine.arguments.contains("--history-flow") { HistoryFlowTest.run(); return }
@@ -257,17 +284,62 @@ struct AppHandoffTest {
             let before = DaemonProcess.starts
             invoke(app, "toggleDaemon")
             precondition(DaemonProcess.starts == before + 1)
-            invoke(app, "toggleDaemon") // Turn Off while the previous start has not connected.
-            invoke(app, "toggleDaemon") // An explicit retry must not wait for the passive 90-second throttle.
-            precondition(DaemonProcess.starts == before + 2, "explicit rapid retry bypasses the passive start throttle")
+            invoke(app, "toggleDaemon") // A launched process cannot be cancelled by flipping the preference.
+            precondition(app.handoffTestSetup.onApplying?(true) == false,
+                         "a pending launch must reject offline mode and calls changes")
+            precondition(DaemonProcess.starts == before + 1)
+            daemon.connectResult = true
+            daemon.snapshot = ["cloud": true, "calls_enabled": true]
             app.handoffTestTick()
-            precondition(DaemonProcess.starts == before + 2, "retry permission remains one shot")
+            precondition(daemon.isConnected && app.dictation.isEnabled,
+                         "the original daemon must remain reachable without a mode mismatch")
+            precondition(app.handoffTestSetup.onApplying?(true) == true,
+                         "settings may change after the launched daemon is ready")
+        }
+        do {
+            let app = make(), daemon = app.handoffTestDaemon
+            invoke(app, "toggleDaemon")
+            daemon.acknowledge()
+            daemon.loseConnection()
+            daemon.connectResult = false
+            precondition(app.handoffTestSetup.onApplying?(true) == true,
+                         "a confirmed stopped daemon still permits offline settings")
+        }
+        do {
+            let app = make(), daemon = app.handoffTestDaemon
+            daemon.loseConnection()
+            daemon.connectResult = false
+            invoke(app, "toggleDaemon")
+            DaemonProcess.launchExit?()
+            invoke(app, "toggleDaemon")
+            precondition(app.handoffTestSetup.onApplying?(true) == true,
+                         "a confirmed failed launch can be turned off and configured")
+        }
+        do {
+            let app = make(snapshot: ["cloud": false])
+            precondition(!app.daemon.subscribed && !app.dictation.isEnabled)
+            precondition(app.handoffTestSetup.onApplying?(true) == true,
+                         "connected mode rejection must allow explicit Settings recovery")
+            app.handoffTestSetup.onApplied?(["completed": true, "mode": "local"], false)
+            precondition(app.daemon.subscribed && app.daemon.calls.filter { $0 == "subscribe" }.count == 2,
+                         "recovery must really subscribe, not merely request status")
+            app.daemon.emit(["event": "state", "state": "failed", "error": "synthetic"])
+            precondition(!app.dictation.isEnabled)
+            app.daemon.emit(["event": "state", "state": "ready"])
+            precondition(app.dictation.isEnabled, "events must reach the recovered subscription")
+        }
+        do {
+            let app = make(completed: false)
+            precondition(app.handoffTestSetup.onApplying?(true) == true,
+                         "first-run settings can be saved before the daemon is started")
         }
         do {
             let app = make()
             app.handoffTestSetup.onApplying?(true)
             app.handoffTestSetup.onApplying?(false)
             precondition(app.handoffTestWatch("prepare") == "busy", "Settings failure without an Apply ACK is uncertain")
+            app.daemon.onEvent?(["event": "state", "state": "ready"])
+            precondition(!app.dictation.isEnabled, "an ambiguous settings ACK must not re-enable dictation")
         }
         do {
             var exits = 0

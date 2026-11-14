@@ -26,10 +26,6 @@ class Level:
     sys_db: float
 
 
-def list_mics() -> str:
-    return subprocess.run([str(capture_helper()), "--list-devices"], capture_output=True, text=True, check=True).stdout
-
-
 def new_recording_path(recordings_dir: Path) -> Path:
     return recordings_dir / f"call-{datetime.now():%Y-%m-%d_%H-%M-%S}.wav"
 

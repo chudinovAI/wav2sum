@@ -131,6 +131,29 @@ struct MainWindowTest {
             precondition(window.firstResponder === detail, "revealing history details must add them to keyboard navigation")
             window.close()
         }
+        do {
+            let app = AppHandoffTest.make(devWatchMode: false, snapshot: ["calls_enabled": false])
+            let record = button(app, "record-call")
+            let kind = descendants(app.mainWindow.history).compactMap { $0 as? NSSegmentedControl }.first!
+            precondition(record.isHiddenOrHasHiddenAncestor && kind.isHiddenOrHasHiddenAncestor)
+            precondition(!text(app, "dictation-state").isEmpty && app.dictation.isEnabled)
+            precondition(!descendants(app.mainWindow.window.contentView!).contains {
+                $0.identifier?.rawValue == "calls-enabled"
+            }, "call configuration belongs only in Settings")
+            let menu = NSMenu(); app.menuNeedsUpdate(menu)
+            precondition(!menu.items.contains {
+                $0.action == NSSelectorFromString("toggleRecording") ||
+                $0.action == NSSelectorFromString("summarizeLastMeeting")
+            })
+            app.daemon.snapshot["calls_enabled"] = true
+            app.setupWindow.onApplied?(["completed": true, "mode": "cloud", "calls_enabled": true], false)
+            precondition(!record.isHiddenOrHasHiddenAncestor && !kind.isHiddenOrHasHiddenAncestor)
+            precondition(app.dictation.isEnabled)
+            app.daemon.snapshot["calls_enabled"] = false
+            app.setupWindow.onApplied?(["completed": true, "mode": "cloud", "calls_enabled": false], false)
+            precondition(record.isHiddenOrHasHiddenAncestor && kind.isHiddenOrHasHiddenAncestor)
+            precondition(app.dictation.isEnabled)
+        }
         print("native main window tests passed")
     }
 }

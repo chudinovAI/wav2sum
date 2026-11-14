@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     lazy var dictation = DictationController(daemon: daemon)
     private var cloud = false
     private var setupCompleted = false
+    private var callsEnabled = true
     private var applyingSettings = false
     private var waitingForExit = false
     lazy var setupWindow = SetupWindow(initialCloud: CommandLine.arguments.contains("--cloud"))
@@ -76,6 +77,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     private var recordingSeconds = 0.0
     private var dictating = false
     private var startedAt: Date?
+    private var launchingID: UUID?
     private var reconnectTimer: Timer?
 
     private var daemonWanted: Bool {
@@ -84,7 +86,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     }
 
     private var isConnected: Bool { daemon.isConnected }
-    private var isReady: Bool { setupCompleted && !applyingSettings && !waitingForExit && isConnected && subscribed && connectionError == nil && status["state"] as? String == "ready" }
+    private var isReady: Bool { setupCompleted && !applyingSettings && !waitingForExit && !settingsUncertain && isConnected && subscribed && connectionError == nil && status["state"] as? String == "ready" }
     private var dictationEnabled: Bool { isReady && !(devWatch?.prepared ?? false) }
     private var isRecording: Bool { status["recording"] is JSON }
     private var jobs: [JSON] { status["jobs"] as? [JSON] ?? [] }
@@ -94,7 +96,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         return isRecording ? "Stop Recording" : "Start Call Recording"
     }
     private var canToggleRecording: Bool {
-        !(devWatch?.prepared ?? false) && !recordingRequestPending && !recordingStateUnknown
+        callsEnabled && !(devWatch?.prepared ?? false) && !recordingRequestPending && !recordingStateUnknown
             && (isReady || (isRecording && isConnected && subscribed))
     }
     private var backgroundTitle: String {
@@ -103,11 +105,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     }
     private var canToggleBackground: Bool {
         !(devWatch?.prepared ?? false) && setupCompleted && !applyingSettings && !waitingForExit
-            && connectionError == nil && (!isConnected || subscribed)
+            && launchingID == nil && connectionError == nil && (!isConnected || subscribed)
     }
     private var connectionDescription: String {
         if !setupCompleted { return "Setup required" }
         if applyingSettings || waitingForExit { return "Applying settings…" }
+        if settingsUncertain { return "Settings not confirmed; open Settings." }
         if let connectionError { return connectionError }
         if !isConnected {
             return devWatchMode && startedAt == nil ? "Off" : (daemonWanted ? "Starting…" : "Off")
@@ -126,7 +129,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         return "Record your microphone and system audio together."
     }
     private var canProcessHistory: Bool {
-        isReady && !(devWatch?.prepared ?? false) && !historyProcessPending && historyInFlight == nil
+        callsEnabled && isReady && !(devWatch?.prepared ?? false) && !historyProcessPending && historyInFlight == nil
             && historyReadError == nil && historyActionError == nil
     }
     private var dictationDescription: String {
@@ -193,7 +196,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         setupWindow.onApplying = { [weak self] applying in
             guard let self else { return false }
             if applying && (self.dictation.busyForHandoff || self.pendingCorrections.isBusy
-                || self.pendingActions.isBusy || self.applyingSettings || self.waitingForExit) { return false }
+                || self.pendingActions.isBusy || self.applyingSettings || self.waitingForExit
+                || self.isRecording || self.recordingStateUnknown && self.isConnected && self.subscribed
+                || self.jobs.contains { ["queued", "running"].contains($0["state"] as? String ?? "") }
+                || (self.isConnected && self.subscribed && self.status["state"] as? String == "loading")) { return false }
+            if applying && self.launchingID != nil { return false }
             self.applyingSettings = applying
             if applying { self.settingsUncertain = true }
             self.dictation.isEnabled = false
@@ -217,7 +224,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             self.startedAt = nil
             self.dictation.isEnabled = self.dictationEnabled
             if !restart && self.isConnected {
-                self.daemon.request("status") { [weak self] reply in self?.apply(status: reply) }
+                let generation = self.connectionGeneration
+                self.daemon.request(self.subscribed ? "status" : "subscribe") { [weak self] reply in
+                    guard let self, generation == self.connectionGeneration else { return }
+                    self.apply(status: reply)
+                }
             }
             self.tick()
             self.updateIcon()
@@ -253,6 +264,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             let needsModeChoice = requestCloud && settings["mode"] as? String != "cloud"
             self.setupCompleted = settings["completed"] as? Bool == true && !needsModeChoice
             self.cloud = settings["mode"] as? String == "cloud"
+            self.callsEnabled = settings["calls_enabled"] as? Bool ?? true
             self.daemon.cloud = self.cloud
             if !self.setupCompleted { self.setupWindow.show(requestCloud: requestCloud) }
             self.tick()
@@ -282,11 +294,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         if daemon.connect(path: DaemonProcess.socketPath) {
             _ = devWatch?.takeDaemonStartPermission()
             startedAt = nil
-            daemon.request("subscribe") { [weak self] reply in self?.apply(status: reply) }
-        } else if daemonWanted && Date().timeIntervalSince(startedAt ?? .distantPast) > 90,
+            launchingID = nil
+            let generation = connectionGeneration
+            daemon.request("subscribe") { [weak self] reply in
+                guard let self, generation == self.connectionGeneration else { return }
+                self.apply(status: reply)
+            }
+        } else if daemonWanted && launchingID == nil && Date().timeIntervalSince(startedAt ?? .distantPast) > 90,
                   !devWatchMode || devWatch?.takeDaemonStartPermission() == true {
             startedAt = Date()
-            DaemonProcess.start(cloud: cloud)
+            let id = UUID()
+            launchingID = id
+            DaemonProcess.start(cloud: cloud) { [weak self] in
+                guard let self, self.launchingID == id else { return }
+                self.launchingID = nil
+                self.updateIcon()
+            }
         }
         updateIcon()
     }
@@ -316,6 +339,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     }
 
     private func apply(status reply: JSON) {
+        guard !waitingForExit else { return }
         guard reply["ok"] as? Bool == true else {
             subscribed = false
             connectionError = reply["error"] as? String ?? "Subscription failed"
@@ -326,7 +350,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         }
         guard (reply["cloud"] as? Bool ?? false) == cloud else {
             subscribed = false
-            connectionError = "Background process mode mismatch"
+            connectionError = "Background process mode mismatch; open Settings."
             dictation.isEnabled = false
             renderHistory()
             updateIcon()
@@ -335,6 +359,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         subscribed = true
         connectionError = reply["state"] as? String == "failed"
             ? (reply["error"] as? String ?? "Background process failed; open Settings") : nil
+        callsEnabled = reply["calls_enabled"] as? Bool ?? true
         status = reply
         recordingSeconds = (reply["recording"] as? JSON)?["seconds"] as? Double ?? 0
         if recordingStateUnknown { recordingMessage = ""; recordingFailed = false }
@@ -354,10 +379,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
             status["state"] = event["state"]
             if event["state"] as? String == "failed" {
                 connectionError = event["error"] as? String ?? "Selected models or credentials are unavailable; open Settings"
-            } else if event["state"] as? String == "ready" {
+            } else if event["state"] as? String == "ready" && (status["cloud"] as? Bool ?? false) == cloud {
                 connectionError = nil
             }
             dictation.isEnabled = dictationEnabled
+            renderHistory()
         case "recording":
             let active = event["active"] as? Bool == true
             status["recording"] = active ? ["path": event["path"] ?? "", "auto": event["auto"] ?? NSNull()] as JSON : nil
@@ -398,14 +424,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         menu.addItem(toggle)
         menu.addItem(.separator())
 
-        let record = item(recordActionTitle, #selector(toggleRecording))
-        record.isEnabled = canToggleRecording
-        menu.addItem(record)
-        if isRecording { menu.addItem(disabled("\(clock(recordingSeconds)) · \(recordingDescription)")) }
-
-        let summary = item(cloud ? "Summarize Last Meeting" : "Summarize Last Meeting (requires cloud mode)", #selector(summarizeLastMeeting))
-        summary.isEnabled = !(devWatch?.prepared ?? false) && cloud && isReady && !isRecording && !summaryRequestPending
-        menu.addItem(summary)
+        if callsEnabled {
+            let record = item(recordActionTitle, #selector(toggleRecording))
+            record.isEnabled = canToggleRecording
+            menu.addItem(record)
+            if isRecording { menu.addItem(disabled("\(clock(recordingSeconds)) · \(recordingDescription)")) }
+            let summary = item(cloud ? "Summarize Last Meeting" : "Summarize Last Meeting (requires cloud mode)", #selector(summarizeLastMeeting))
+            summary.isEnabled = !(devWatch?.prepared ?? false) && cloud && isReady && !isRecording && !summaryRequestPending
+            menu.addItem(summary)
+        }
 
         let key = dictation.hotkey.key.label
         menu.addItem(disabled(isReady ? "Dictation: hold \(key)  ·  double-tap for hands-free" : "Dictation unavailable"))
@@ -416,7 +443,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         }
 
         let recent = jobs.suffix(5).reversed()
-        if !recent.isEmpty {
+        if callsEnabled && !recent.isEmpty {
             menu.addItem(.separator())
             menu.addItem(disabled("Recordings"))
             for job in recent {
@@ -436,7 +463,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         }
 
         menu.addItem(.separator())
-        menu.addItem(item("Open Output Folder", #selector(openOutput)))
+        if callsEnabled { menu.addItem(item("Open Output Folder", #selector(openOutput))) }
         menu.addItem(item("Settings…", #selector(openSettings)))
         menu.addItem(item("Share Examples…", #selector(openSharing)))
         menu.addItem(item("Advanced Settings (config.toml)", #selector(openConfig)))
@@ -463,6 +490,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     private func updateIcon() {
         mainWindow.update(.init(
             status: "\(cloud ? "Cloud" : "Local") · \(connectionDescription)",
+            callsEnabled: callsEnabled,
             recording: recordingDescription, elapsed: clock(recordingSeconds), recordingActive: isRecording,
             recordTitle: recordActionTitle, recordEnabled: canToggleRecording,
             backgroundTitle: backgroundTitle, backgroundEnabled: canToggleBackground,
@@ -470,9 +498,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
                 : status["auto_process"] as? Bool == true
                     ? "Stopping saves the audio. Automatic processing is enabled in Settings."
                     : "Stopping saves the audio locally. Automatic processing is off.",
-            dictation: dictationDescription, permissions: permissionSummary,
+            dictation: dictationDescription, permissions: callsEnabled ? permissionSummary : permissionSummary.replacingOccurrences(of: " System audio access is checked when recording starts.", with: ""),
             dictationMessage: dictationMessage, dictationIsError: dictationFailed,
             message: recordingMessage, messageIsError: recordingFailed))
+        mainWindow.history.callsEnabled = callsEnabled
         mainWindow.history.cloud = cloud
         mainWindow.history.setProcessingEnabled(canProcessHistory)
         guard let button = statusItem.button else { return }
@@ -497,7 +526,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     }
 
     private func loadHistory() {
-        guard isConnected && subscribed else { renderHistory(); return }
+        guard isConnected && subscribed && connectionError == nil else { renderHistory(); return }
         guard historyDirty && historyInFlight == nil else { return }
         historyDirty = false
         historyReadError = nil
@@ -509,7 +538,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         daemon.request("history") { [weak self] reply in
             guard let self, self.historyInFlight == token else { return }
             self.historyInFlight = nil
-            guard self.isConnected && self.subscribed else { self.renderHistory(); return }
+            guard self.isConnected && self.subscribed && self.connectionError == nil else { self.renderHistory(); return }
             if revision != self.historyRevision { self.loadHistory(); return }
             if reply["ok"] as? Bool == true,
                let calls = reply["calls"] as? [JSON], let dictations = reply["dictations"] as? [JSON] {
@@ -523,7 +552,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     }
 
     private func renderHistory() {
-        let connection = isConnected && subscribed ? nil : "Connect to the background process to read history."
+        let connection = connectionError ?? (isConnected && subscribed ? nil : "Connect to the background process to read history.")
         mainWindow.history.update(calls: historyCalls, dictations: historyDictations,
                                   canProcess: canProcessHistory, isLoading: historyInFlight != nil,
                                   error: historyReadError ?? historyActionError ?? connection)
@@ -553,8 +582,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     }
 
     private func openHistoryResult(_ path: String) {
-        guard isConnected && subscribed && historyInFlight == nil && historyReadError == nil
-                && historyActionError == nil,
+        guard isConnected && subscribed && connectionError == nil && historyInFlight == nil
+                && historyReadError == nil && historyActionError == nil,
               historyCalls.contains(where: { $0["open_path"] as? String == path }) else { return }
         if !effects.openURL(URL(fileURLWithPath: path)) {
             historyActionError = "Could not open the result"
@@ -572,7 +601,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     }
 
     @objc private func toggleDaemon() {
-        guard !(devWatch?.prepared ?? false) else { return }
+        guard !(devWatch?.prepared ?? false), launchingID == nil else { return }
         if devWatchMode && !isConnected && startedAt == nil { daemonWanted = true }
         else { daemonWanted.toggle() }
         if daemonWanted {
@@ -584,6 +613,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
         }
         updateIcon()
     }
+
 
     @objc private func toggleRecording() {
         guard canToggleRecording else { return }
@@ -608,7 +638,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUser
     }
 
     @objc private func summarizeLastMeeting() {
-        guard !(devWatch?.prepared ?? false), cloud && isReady && !isRecording && !summaryRequestPending else { return }
+        guard callsEnabled, !(devWatch?.prepared ?? false), cloud && isReady && !isRecording && !summaryRequestPending else { return }
         summaryRequestPending = true
         actionRequest("summarize_last_meeting") { [weak self] reply in
             guard let self else { return }

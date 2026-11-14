@@ -154,9 +154,10 @@ enum DaemonProcess {
         return (URL(fileURLWithPath: serve[0]), Array(serve.dropFirst().dropLast()) + [action], environment)
     }
 
-    static func start(cloud: Bool) {
+    static func start(cloud: Bool, onExit: @escaping () -> Void) {
         guard let (executable, arguments, environment) = command("serve") else {
             Log.write("daemon runtime unavailable")
+            DispatchQueue.main.async { onExit() }
             return
         }
         let process = Process()
@@ -171,7 +172,11 @@ enum DaemonProcess {
         }
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
-        do { try process.run() } catch { Log.write("failed to start daemon") }
+        process.terminationHandler = { _ in DispatchQueue.main.async { onExit() } }
+        do { try process.run() } catch {
+            Log.write("failed to start daemon")
+            DispatchQueue.main.async { onExit() }
+        }
     }
 
     static func setup(_ request: JSON, completion: @escaping (JSON) -> Void) {

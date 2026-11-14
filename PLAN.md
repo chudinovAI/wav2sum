@@ -228,3 +228,38 @@ Gatekeeper assessment: `spctl --assess` вернул rejected (exit 3). Это i
 Первый CI PR #74: native-проверки прошли; 767 passed / 2 skipped / 1 failed в прежнем Core ML padding-тесте. При нефиксированном случайном входе и неограниченных позиционных значениях float32-разница достигла 2.13e-6 относительно допуска 1.3e-6. Пользователь отдельно разрешил стабилизировать тестовый пример: ограниченные positional values и детерминированные features, без смены float32, проверок формы/длины, допусков assert_close и production Core ML. Merge по-прежнему требует зелёного CI.
 
 Проверка CI-фикстуры: 4 Core ML tests passed, scoped Ruff check/format чистые. Throwaway с 17/21/37 кадрами сохранил padded-prefix parity и отверг вариант без attention mask при прежних допусках; независимое ревью двух строк без замечаний. Случайные признаки/большие positional values больше не являются частью этого теста; его контракт — маскирование padding, не точность произвольных float32 вычислений.
+
+## 20. GUI-only и выключатель созвонов — выполнено в исходниках
+
+14 ноября 2026: пользователь поручил полностью убрать пользовательские TUI и CLI и добавить в GUI кнопку отключения созвонов. Внутренние `serve`/`setup`, необходимые существующему bundle, остаются без изменения build/signing/Info.plist. Developer-инструменты измерений/сборки не являются пользовательским интерфейсом приложения.
+
+Границы: сохраняемый `calls_enabled`, по умолчанию true для прежних настроек; выключение убирает обнаружение, ручную запись, обработку и связанные элементы GUI. Диктовка и её модели/разрешения сохраняются. Записи, результаты, история, словарь и уже скачанные модели не удаляются. Переключение только в idle через существующий configure/restart; рабочий app/daemon не обновляем и не запускаем.
+
+- [x] Удалены TUI, public CLI/console entrypoint, Textual и obsolete CLI helpers; private bootstrap сохранён. Socket test support перенесён в tests без runtime shim. Проверены serve/setup dispatch и отказ прежних пользовательских команд без личных данных.
+- [x] До production-изменений добавлены поведенческие проверки сохранения выбора, запрета call actions, idle/startup guards и работающей диктовки. Python/Swift используют один calls_enabled; единственный изменяющий control — checkbox Settings с Apply.
+- [x] Узкие Python/native сценарии, scoped Ruff/Swift и actual isolated GUI проверены без микрофона, API, реальных данных и выдачи разрешений.
+- [x] README/SPEC/ARCHITECTURE обновлены; фактический граф — 37 модулей/94 связи, DAG. Независимое review итогового Settings-only дизайна: подтверждённых существенных замечаний нет.
+
+Устойчивое решение для следующей сессии; предлагаемая строка для AGENTS.md вместо прежней команды Run: «Пользовательский интерфейс — только native GUI; CLI/TUI удалены. Developer install/watch — по README. Приватные serve/setup сохраняют bundle bootstrap. Созвоны отключаются единственным выключателем в Settings через Apply; диктовка и данные остаются».
+
+После повторного native review пользователь явно выбрал один выключатель в Settings с Apply вместо двух конкурирующих точек управления. Отдельная кнопка главного окна и её синхронизация удалены; автоматических повторных записей конфигурации после неоднозначного ACK нет.
+
+Settings сериализует refresh и Apply без потери стартовых completion. Незавершённый запуск daemon нельзя выдавать за подтверждённый Off; подписка другого mode не блокирует явное configure, а recovery без restart выполняет настоящий subscribe. Cached history actions закрыты при connectionError.
+
+Проверки: backend/config/settings/bootstrap/client/capture/model preparation/history/packaging — узкие Python-прогоны; после исправления изоляции нового Keychain-теста отдельный gate дал 62 passed, позднее две wording-only проверки удалены. Финальный native gate — 7 passed, включая прежний history-flow и настоящий Swift socket client. Scoped Ruff check/format для 21 Python-файла и финальная изменённая native fixture чистые; typecheck всего Swift app прошёл. `uv lock --check --offline` прошёл.
+
+Actual UI: настоящий SetupWindow с isolated JSON helper выполнил off → Apply → on → Apply; call-only поля скрываются и возвращаются. Настоящий MainWindow при calls_enabled=false показывает диктовку и её synthetic history без recording/Calls и без второго выключателя. Проверены AX и screenshots; helper responses и разрешения synthetic, не live backend/capture/inference. Owned preview processes и scratch удалены.
+
+Рабочий bundle/daemon не обновлялись и не запускались; полный suite/coverage/CI, реальная запись/диктовка, ASR/API и установка не проверялись. Подпись, Info.plist, хранение/retention и пользовательские данные не менялись. Старый unreferenced docs/tui.jpg оставлен: image reader не предоставил snapshot tag для безопасного удаления через edit. Ненужных для шага изменений кода: нет.
+
+## 21. Рабочее обновление и GitHub-публикация GUI-only
+
+Пользователь явно разрешил обновить и перезапустить рабочие app/daemon и смержить все изменения проекта в main. Preflight: native app показал Ready to dictate; daemon Cloud ready, recording=null, jobs=[]. Сохранённые режим/согласия/созвоны не меняем, bundle id/signing/Info.plist сохраняем. Перезапуск daemon активирует прежнюю retention, без изменения её политики; реальные записи и API-пробы не входят в проверку.
+
+Публикация — отдельный owned worktree поверх origin/main, без переключения/очистки общего checkout. PR #74 уже merged; повторно его не создаём. Все текущие source/tests/docs изменения публикуются, локальный WATCHDOG.yml исключается. Commit/push/PR и squash merge после зелёного CI разрешены; временная ветка удаляется.
+
+Локальное обновление выполнено: прежние native PID 11585 и daemon PID 1269 завершены после idle preflight. Существующий verified bootstrap installer установил dev bundle с source digest `7d438a8f2a75`, сохранил прежний bundle в собственном backup, прежний signer/designated requirement и Info.plist побайтно. SHA-256 Info.plist: `8ad3d45033c04d6f3aff015990afc9a58daf9e417be10d30900834bd2c7089c3`.
+
+Обновлённое приложение запущено: native PID 64960, daemon PID 64967; actual AX — Cloud Ready, Ready to dictate, прежние Microphone/Input Monitoring/Accessibility allowed. В реальном Settings появился единственный checkbox Enable call recording and processing и доступный Apply. Сохранённый прежний выбор calls_enabled=true не переключали; auto_process=false, recording=null, jobs=[]. TOML и app-settings.json побайтно прежние; аудио/API-проб не было.
+
+Проверки CI и фактический squash merge публикуемого snapshot отслеживаются в GitHub PR, без ручного дублирования статуса в PLAN.

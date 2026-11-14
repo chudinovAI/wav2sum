@@ -16,11 +16,7 @@ dependencies = [
     "silero-vad>=5.1",
     "numpy>=2.2.6",
     "scipy>=1.15.3",
-    "textual>=3",
 ]
-
-[project.scripts]
-wav2sum = "wav2sum.cli:main"
 
 [build-system]
 requires = ["hatchling"]

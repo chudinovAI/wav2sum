@@ -2,7 +2,6 @@
 
 import signal
 import subprocess
-import sys
 
 import pytest
 
@@ -10,7 +9,7 @@ from wav2sum.devwatch import Watcher
 from wav2sum.devwatch_runtime import RuntimeChild
 
 
-def test_watcher_switches_and_restarts_through_cli_with_owned_swift_children(tmp_path, monkeypatch, devwatch_binary):
+def test_watcher_switches_and_restarts_with_owned_swift_children(monkeypatch, devwatch_binary):
     class SyntheticAdapter:
         def __init__(self):
             self.source = "old"
@@ -77,8 +76,7 @@ def test_watcher_switches_and_restarts_through_cli_with_owned_swift_children(tmp
         assert ops.children[1].poll() == 0
         assert ops.accepted == 2
 
-        from wav2sum import cli, devwatch
-        from wav2sum.config import Config
+        from wav2sum import devwatch
 
         def interrupt_once(seconds):
             ops.sleep = lambda _: None
@@ -86,9 +84,7 @@ def test_watcher_switches_and_restarts_through_cli_with_owned_swift_children(tmp
 
         ops.sleep = interrupt_once
         monkeypatch.setattr(devwatch, "Runtime", lambda: ops)
-        monkeypatch.setattr(cli, "load_config", lambda: Config(output_dir=tmp_path / "output"))
-        monkeypatch.setattr(sys, "argv", ["wav2sum", "app", "--watch"])
-        cli.main()
+        devwatch.run(cloud=False)
         assert len(ops.children) == 3 and ops.children[2].poll() == 0
         assert ops.accepted == 3
     finally:
