@@ -1,6 +1,6 @@
 # wav2sum
 
-Krisp + Wispr Flow for macOS, Russian and English. Default local: Qwen/Gemma dictation and on-demand Nemotron call transcription without summary. Explicit `--cloud`: Deepgram ASR and OpenAI cleanup/call summaries. The full goal is in SPEC.md.
+Native macOS app for call recording and dictation in Russian and English. See [SPEC.md](SPEC.md) for the processing modes and privacy rules.
 
 ## Commands
 
@@ -8,7 +8,7 @@ Krisp + Wispr Flow for macOS, Russian and English. Default local: Qwen/Gemma dic
 - Lint: `uv run ruff check && uv run ruff format --check`
 - Typecheck Swift (macOS only): `swiftc -typecheck wav2sum/native/app/*.swift && swiftc -typecheck wav2sum/native/capture.swift && swiftc -typecheck wav2sum/native/vprecord.swift && swiftc -typecheck wav2sum/native/app/Logo.swift wav2sum/native/icon/main.swift`
 - Graph (module dependencies as JSON): `uv run pydeps wav2sum --show-deps --no-output --only wav2sum`
-- Run: `uv run wav2sum app` (menu bar app and daemon), `uv run wav2sum tui`, `uv run wav2sum meeting.mp3`
+- Build and open the native development app using [Checkout environment](README.md#checkout-environment).
 - Dictation latency from the history (read-only): `uv run python -m wav2sum.latency`
 - Dictation quality from the history (read-only): `uv run python -m wav2sum.quality`
 - Numbers and names in a fresh cloud summary absent from the transcripts (does not write results): `uv run python -m wav2sum.factcheck --cloud [call folder ...]`. This sends transcript text to OpenAI; run on real calls only with separate authorization for those calls.
@@ -72,8 +72,8 @@ CI (`.github/workflows/ci.yml`) runs ruff on Linux and the tests (with coverage,
 - Do not touch secrets or `.env` files.
 - Do not change how recordings, transcripts, history and `vocabulary.json` are stored or deleted without asking (`history.py`, `calls.py`, `vocabulary.py`). These files are my real calls and dictations, and a mistake loses them for good.
 - Do not change the app's bundle id, signing or `Info.plist` (`build.py`, `wav2sum/native/Info.plist`) without asking. macOS ties Microphone, Accessibility, Input Monitoring and System Audio permissions to them, and a change makes me grant all of them again.
-- Do not change the daemon socket protocol (`daemon.py`, `client.py`, `native/app/Daemon.swift`) on one side only. The Python daemon and the Swift app must change together.
-- Do not send audio or text outside the machine in the default local mode. The user approved an explicit `--cloud` mode: audio goes to Deepgram, dictation cleanup and call summaries to OpenAI API. Never select cloud implicitly, fall back between modes/providers, or upload real user recordings for tests without separate authorization. Internal company APIs are not part of the approved implementation.
+- Do not change the daemon socket protocol (`wav2sum/daemon.py`, `wav2sum/native/app/Daemon.swift`) on one side only. The Python daemon and the Swift app must change together.
+- Do not send audio or text outside the machine in the default local mode. Cloud mode requires explicit selection in the app. It sends audio to Deepgram and uses OpenAI for dictation cleanup and call summaries. Never select cloud implicitly, fall back between modes/providers, or upload real user recordings for tests without separate authorization. Internal company APIs are not part of the approved implementation.
 
 ## Project rules
 
