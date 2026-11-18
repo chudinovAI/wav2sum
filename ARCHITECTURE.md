@@ -144,85 +144,12 @@ graph LR
 | `model_benchmark` | synthetic/explicit local ASR+cleanup repeats, quality refs, process-tree RSS/system swap, no text by default | audio, dictation, llm, local_models, models |
 | `distribution` | fresh app/DMG, runtime/FFmpeg/codec relocation; ordinary build without keys, explicit private-beta hidden prompts and signed credentials resource | build, credentials |
 
-## Публичные функции
+## Границы компонентов
 
-Только те, что зовут из других модулей.
-
-| Функция | Вход | Выход | Побочные эффекты | Кто вызывает |
-|---|---|---|---|---|
-| `catalog.list_calls` | recordings_dir, output_dir | `list[CallEntry]` | читает directory entries/meta, не читает transcript content, не пишет и не загружает модели | daemon |
-| `credentials.credential` | имя Deepgram/OpenAI API_KEY | секрет | env → собственный Keychain → opt-in beta resource → ошибка; только cloud; denial fail closed, без фоновых prompts | cloud |
-| `credentials.Keychain` | service/account; get/set | секрет или None для отсутствующего item | native CF/Security API; ошибки доступа не превращаются в отсутствие ключа | credentials |
-| `credentials.has_bundled_credentials` | — | bool presence | stat resource без чтения секрета/Keychain; не проверка действительности ключей | settings |
-| `daemon.serve` | `Config`, `verbose` | — | конфиг по умолчанию, лог/сокет; shutdown ждёт in-flight model work и закрывает dictation/summary clients | private `__main__` |
-| `calls.process` | звук, `Models` с режимом, папка, cloud LLM, раскладка/спикеры/язык | `Result` | прежние transcript/meta/cache; новый summary только cloud; params кэша различают backend | daemon |
-| `calls.summarize_existing` | processed folder, cloud LLM, vocabulary/dictionary | `Path` результата | читает transcript/meta, использует прежний grounded summary/chapters; атомарно добавляет только отсутствующий summary.md, не переписывает transcript/audio/meta | daemon |
-| `capture.CallRecorder` | путь WAV, микрофон, приложение звонка | `start`/`wait`/`stop` | процесс хелпера, WAV и сайдкар `.json` | daemon |
-| `capture.new_recording_path` | папка записей | `Path` | нет | daemon |
-| `autorecord.CallDetector` | события микрофона | решение start/stop | нет | daemon |
-| `build.capture_helper` | optional executable env path | `Path` | bundled helper validation без компиляции; иначе development build/sign/cache | autorecord, capture |
-| `build.install_app`, `bootstrap_watch_app` | — | `Path` | собирает из source snapshot и подписывает staging; bootstrap требует совпадающую постоянную подпись, dev bundle и неизменный Info.plist; без `pkill`, прежний bundle сохраняется | явный developer install/bootstrap |
-| `build.source_snapshot`, `source_digest` | app source dir / snapshot, serve argv, signer | bytes по относительным именам / 12hex framed digest | читает только Swift app/icon; digest без I/O | install/bootstrap, devwatch_runtime |
-| `build.build_app`, `verify_dev_app` | immutable snapshot, новый stage, plist/signature / dev bundle, serve argv | stage / leaf+requirement | общий Swift/icon/sign pipeline с собственным временным scratch / проверка layout/env/codesign; без публикации и запуска | install/bootstrap, devwatch_runtime |
-| `build._atomic_publish`, `_check_no_app_process` | stage/target/swap / — | — / отказ | exclusive publish/atomic exchange без удаления / консервативный pgrep; общие preflight/publication для installer и watcher | install/bootstrap, devwatch_runtime |
-| `devwatch.run` | `cloud` | — | opt-in цикл handoff; первый Ctrl-C завершает текущий control reply, ждёт работу и закрывает только dev-app; второй прерывает ожидание, daemon не перезапускает | явный developer запуск |
-| `devwatch_runtime.Runtime` | child pipes, snapshots и stage | операции watcher | verified signing/identity/path, process preflight, owned child, обмен/rollback и очистка только своего scratch после ACK | devwatch |
-| `asr.QwenTranscriber` | mono 16 кГц, спаны, язык, keyword-only `terms` | текст без контекста/служебных тегов; ошибка обрезанного ответа | закреплённый checkpoint, contextual processor prompt, lock | models, dictation через Models |
-| `cloud.DeepgramTranscriber` | mono/stereo 16 кГц, язык/раскладка, `terms`; optional keyword-only `timeout` у `transcribe`; `start_dictation` | batch HTTP-текст/реплики или lazy `DeepgramUpload` без запроса/ключей до аудио | cloud-only HTTPS; `DEEPGRAM_API_KEY`; повторные `keyterm`; auto/multi — `language_hint=ru,en`, explicit ru/en без hint; batch timeout по умолчанию 300 с | models, calls/dictation через Models |
-| `cloud.DeepgramUpload` | `add` PCM, `finish`, `close`, `sent_samples` | только полный финальный текст после EOF, кэш успешного finish | один worker/HTTP chunked request с первого непустого add; ограниченный backlog (один готовый вход может быть крупным), overflow — ошибка; finish deadline 20 с, close будит ожидание/делает best-effort socket shutdown; DNS/connect могут завершиться позже; default proxy/TLS/no redirect/replay | DeepgramTranscriber, DictationStream |
-| `context.recognition_terms` | источники строк в порядке приоритета | tuple до 50 терминов / 500 UTF-8 байт | нет | calls, dictation, factcheck |
-| `context.canonicalize_terms` | текст ASR и заданные термины | каноническое написание только mixed Cyrillic/Latin слова с точной транслитерацией | нет; таблица TRANSLIT читается из модуля, файл словаря не загружается | calls, dictation |
-| `cloud.OpenAILLM` | промпт, примеры, ограничения; model (default Terra), optional `service_tier`; `preconnect()` | завершённый текст; консервативный UTF-8 `count_tokens`; optional Thread handle preconnect | direct HTTP/1.1 keepalive/verified TLS; best-effort TCP/TLS без HTTP/ключей, один worker вне lock; foreground не ждёт warming, generation/close отбрасывает поздний socket; proxy — прежний urllib без preconnect; без POST replay; Terra/Luna `reasoning_effort=none` | daemon/factcheck владеют lifetime; DictationStream использует Luna/Fast и preconnect |
-| `nemotron.NemotronTranscriber` | PCM, спаны, язык, keyword-only `terms`, binary/GGUF | полный текст | worker protocol 3, contextual `prompt`, close/reap | models |
-| `dictation.Dictator` | звук, приложение, режим, текст у курсора | `Dictation` | local Gemma или cloud Luna/Fast; прямой LLM cleanup без regex/semantic guards; snippets/словарь/курсор сохраняются | daemon, evalset |
-| `dictation.DictationStream` | PCM-чанки и `DictationContext`; step/finish/close | local preview, финальный текст/язык, счётчики samples/revision и timings | local incremental VAD/ограниченный хвост; cloud лениво создаёт upload и сразу отдаёт аудио, не хранит весь float PCM; при cleanup входящее аудио также готовит/обновляет OpenAI connection (владелец — общий LLM-клиент); finish single-flight/canonicalize/cache; close отменяет upload вне session lock и отбрасывает поздний результат | daemon, Dictator |
-| `vad.VoiceActivityDetector`, `vad.VoiceActivityStream` | batch PCM или последовательные чанки | batch spans; completed/preview spans и finish в абсолютных секундах | отдельная reset-копия Silero на сессию, без повторной обработки старого PCM | models, dictation через Models |
-| `dictation.user_examples` | правки из `edits.jsonl` | примеры на стиль и язык | нет | daemon, evalset |
-| `summarizer.summarize` | таймкодированный speaker-labelled транскрипт, LLM, термины, язык | summary с точными видимыми `[U… время–время]` | bounded map/reduce; некорректный/чужой источник — ошибка, не uncited fallback | calls, factcheck |
-| `summarizer.chapters` | транскрипт с таймкодами, `LLM`, язык | `str` | вызывает LLM | calls |
-| `llm.LLM` | локальная модель, контекст, время жизни | `chat`, `count_tokens`, `unload` | MLX, поток `llm`, кэш/таймеры локальной диктовки | dictation, evalset; типы calls/summarizer |
-| `llm.memory_mb` | — | `int` | нет | daemon |
-| `models.Models` | device, cloud, call_model, allow_unsafe_nemotron | lazy dictation/call ASR, VAD/diarizer, preload/session/unload | Qwen либо guarded Nemotron; call_session освобождает только call ASR, dictation остаётся; no cloud fallback | calls, daemon, dictation, evalset, benchmark |
-| `vocabulary.Vocabulary` | путь к `vocabulary.json` | `words`, `apply`, `learn` | `learn` пишет `vocabulary.json` | calls, daemon, dictation, evalset, factcheck |
-| `history.load_dictations` | путь, лимит | `list[dict]` | нет | daemon, evalset |
-| `history.append_dictation` | запись | — | дописывает `dictations.jsonl` под lock | daemon |
-| `history.prune_dictations` | path, optional aware now | число удалённых строк | fixed 7×24h cutoff UTC; shared lock/atomic replace, retained bytes/order/mode; unknown/naive/future сохраняются, malformed/unsafe/I/O failure не теряет оригинал; vocabulary/edits/calls не читает и не меняет | daemon startup/hourly maintenance |
-| `config.load_config` | TOML path, optional preferences_path | `Config` | читает TOML/app preferences, не меняет runtime cloud и пользовательские пути | private `__main__`, coreml, evalset, factcheck |
-| `config.exclusive` | путь, `wait` | `bool` | `flock` без truncation; `O_NOFOLLOW`, regular file и один hardlink | build, history, config preferences, sharing |
-| `audio.load_audio` | путь, каналы | `np.ndarray` | ffmpeg | calls, coreml, evalset |
-| `audio.file_hash` | путь | `str` | читает файл | calls, history |
-| `audio.pcm16_to_float` | `bytes` | `np.ndarray` | нет | daemon |
-| `echo.suppress_echo` | микрофон, системный канал | `np.ndarray` | нет | calls |
-| `conversation.build_conversation`, `drop_echo`, `format_transcript` | реплики | реплики, текст | нет | calls |
-| `language.text_language` | финальный текст | RU/EN для промпта | нет | calls, dictation |
-| `config.validate_settings`, `load_preferences`, `save_preferences`, `apply_preferences` | explicit mode/models/consent/calls-enabled choices и optional path | validated dict / Config mutation | строгие booleans/enums/отдельные cloud consents, legacy calls_enabled=true; private atomic JSON under shared lock, отказ от unsafe file; ключи не сохраняются | settings, daemon, load_config |
-| `settings.handle`, `settings.main` | local JSON request / stdin pipe | single JSON reply | status без keys/downloads; explicit configure RPC, Keychain save, model prepare, reviewed export; sanitized failures | private `__main__` setup, native DaemonProcess |
-| `sharing.list_examples`, `export_examples` | history/edits paths; selected ids/targets/confirmed, consent, new destination | list / count | locks, revalidation current sources; только text allowlist, atomic no overwrite; no source mutation/network | settings, native SharingWindow |
-| `local_models.hardware_info`, `recommendation`, `check_memory`, `model_status` | optional hardware dict, model selection/override | privacy-safe dict / validation | no serial/UUID, no passive downloads/keys; provisional 16/24/32/48 classes, memory guard not safety proof | models, settings, benchmark |
-| `local_models.prepare_models`, `snapshot_path`, `speech_paths`, `model_root` | selected pinned models, calls_enabled, optional explicit HF token | status / local paths | explicit public downloads/checksums; без созвонов только Qwen/Gemma, без Nemotron/pyannote; gated access не принимается автоматически, no audio/text upload or token persistence | settings, asr/llm/diarizer/nemotron |
-| `model_benchmark.benchmark`, `error_rate`, `summarize_timings`, `MemorySampler`, `main` | explicit or synthetic audio, separate spoken/clean references, repeats>=3 | timing/quality/RSS/swap JSON | actual local inference, TTS generation, sampled metrics with limits, no text unless requested | module CLI / friend measurements |
-| `distribution.create_distribution`, `main` | new output, optional no_dmg/beta_keys; CLI private-beta hidden prompts | app path / CLI report | compile/copy/fix/audit/sign/relocation/decode/DMG; optional friend credentials only in copied package, owner-only private output; no live install or implicit key lookup | module CLI |
-
-## Типы и модели данных
-
-| Тип | Где определён | Поля | Наследует / содержит |
-|---|---|---|---|
-| `Config` | `config.py` | прежние поля, `calls_enabled`, `auto_process`, `call_model`, `allow_unsafe_nemotron`, runtime-only `cloud`/`auto_cloud_consent` | app preferences overlay processing/calls only, не runtime cloud; separate upload consent не TOML-флаг |
-| `DictationConfig` | `config.py` | `hotkey`, `model`, `cleanup`, `learn`, `dictionary`, `snippets`, `apps` | — |
-| `CallEntry` | `catalog.py` | `path`, resolved `audio` или None, `meta` или None | frozen dataclass; исходные файлы не изменяет |
-| `Speakers` | `calls.py` | `count`, `min`, `max` | — |
-| `Names` | `calls.py` | `me`, `them`, `diarized` | — |
-| `Result` | `calls.py` | `out_dir`, `layout`, `language`, `duration_sec`, `utterances`, `summary`, `timings` | содержит `Utterance` |
-| `Utterance` | `conversation.py` | `start`, `end`, `text`, `speaker` | — |
-| `Piece` | `conversation.py` | `start`, `end`, `speaker` | — |
-| `Turn` | `diarizer.py` | `speaker`, `start`, `end` | — |
-| `Level` | `capture.py` | `seconds`, `mic_db`, `sys_db` | — |
-| `Job` | `daemon.py` | `id`, `audio`, `state`, `stage`, `out_dir`, `error` | — |
-| `DictationSession` | `daemon.py` | `stream`, `session`, `step`, `error`, `preview`, `finishing`, `finalized_at` | состояние соединения; финал захватывает объект до фонового запуска |
-| `DictationContext` | `dictation.py` | `style`, `language`, `dictionary`, `terms`, `fixes`, `snippets` | frozen dataclass с tuple-полями, snapshot в начале сессии |
-| `Dictation` | `dictation.py` | `raw`, `text`, `style`, `language`, `command`, `timings`, `translate` | — |
-| `LLM` | `llm.py` | `model`, `num_ctx`, `temperature`, `think`, `keep_alive`, `timeout`, `cache_prefix` | — |
-| `Prompts` | `dictation.py`, `summarizer.py` | тексты промптов на язык | — |
+- `config` читает TOML, хранит согласие и параметры в приватных app preferences. Переопределение режима происходит при явном запуске runtime. `settings` обслуживает JSON-запросы нативного приложения; чтение статуса обходится без загрузок моделей и обращения к Keychain.
+- `daemon` владеет сокетом, записью и жизненным циклом моделей. `calls` отвечает за результаты и кэш распознавания, `catalog` читает метаданные для истории, `history` ведёт журнал диктовки и удаляет только записи с подтверждённым возрастом старше семи суток.
+- `dictation` фиксирует словарь, язык, стиль и примеры в начале сессии. `models` выбирает ASR внутри установленного режима. `cloud` держит один запрос диктовки и выдаёт полный финал после EOF. Локальная ветка использует потоковый VAD и MLX для чистки.
+- `sharing` заново сверяет выбранные источники перед подтверждённым экспортом текста и атомарно создаёт новый файл. `build`, `devwatch` и `distribution` отвечают за dev-сборку, её замену и standalone-пакет соответственно.
 
 ## Native UI и протокол
 
