@@ -1,7 +1,6 @@
 import difflib
 import json
 import logging
-import os
 import re
 from pathlib import Path
 
@@ -89,7 +88,11 @@ def _sounds_alike(heard: str, written: str) -> bool:
     a, b = _latin(heard), _latin(written)
     if a == b:
         return heard != written
-    common = len(os.path.commonprefix([heard.lower(), written.lower()]))
+    common = 0
+    for heard_char, written_char in zip(heard.lower(), written.lower(), strict=False):
+        if heard_char != written_char:
+            break
+        common += 1
     if common and max(len(heard), len(written)) - common <= 2:
         return False
     return difflib.SequenceMatcher(a=a, b=b).ratio() >= MIN_SIMILARITY
